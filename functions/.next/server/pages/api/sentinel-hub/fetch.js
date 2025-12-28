@@ -1,0 +1,25 @@
+"use strict";(()=>{var e={};e.id=192,e.ids=[192],e.modules={145:e=>{e.exports=require("next/dist/compiled/next-server/pages-api.runtime.prod.js")},1593:e=>{e.exports=import("geotiff")},6249:(e,t)=>{Object.defineProperty(t,"l",{enumerable:!0,get:function(){return function e(t,n){return n in t?t[n]:"then"in t&&"function"==typeof t.then?t.then(t=>e(t,n)):"function"==typeof t&&"default"===n?t:void 0}}})},7092:(e,t,n)=>{n.a(e,async(e,r)=>{try{n.r(t),n.d(t,{config:()=>c,default:()=>l,routeModule:()=>d});var i=n(1802),a=n(7153),s=n(6249),o=n(1697),u=e([o]);o=(u.then?(await u)():u)[0];let l=(0,s.l)(o,"default"),c=(0,s.l)(o,"config"),d=new i.PagesAPIRouteModule({definition:{kind:a.x.PAGES_API,page:"/api/sentinel-hub/fetch",pathname:"/api/sentinel-hub/fetch",bundlePath:"",filename:""},userland:o});r()}catch(e){r(e)}})},1697:(e,t,n)=>{n.a(e,async(e,r)=>{try{n.r(t),n.d(t,{default:()=>u});var i=n(1593),a=e([i]);async function s(){let e=process.env.SENTINEL_HUB_CLIENT_ID,t=process.env.SENTINEL_HUB_CLIENT_SECRET;if(!e||!t)return null;let n=await fetch("https://services.sentinel-hub.com/oauth/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"client_credentials",client_id:e,client_secret:t})});return n.ok?(await n.json()).access_token:null}async function o(){let e=process.env.SENTINEL_HUB_CLIENT_ID,t=process.env.SENTINEL_HUB_CLIENT_SECRET;if(!e||!t)return null;let n=await fetch("https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"client_credentials",client_id:e,client_secret:t})});return n.ok?(await n.json()).access_token:null}i=(a.then?(await a)():a)[0];let l=`//VERSION=3
+function setup(){
+  return {
+    input: [{ bands:["B04","B08"], units: "REFLECTANCE" }],
+    output: { bands: 1, sampleType: "FLOAT32" }
+  }
+}
+function evaluatePixel(s){
+  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04)
+  if (!isFinite(ndvi)) ndvi = 0
+  return [ndvi]
+}`,c=`//VERSION=3
+function setup(){
+  return { input:[{ bands:["B04","B08"], units: "REFLECTANCE" }], output: { bands: 3 } }
+}
+function evaluatePixel(s){
+  let v = (s.B08 - s.B04) / (s.B08 + s.B04)
+  if (!isFinite(v)) v = 0
+  let r,g,b
+  if (v < 0){ r=128; g=0; b=38 }
+  else if (v < 0.2){ r=255; g=255; b=178 }
+  else if (v < 0.4){ r=127; g=201; b=127 }
+  else { r=27; g=120; b=55 }
+  return [r/255, g/255, b/255]
+}`;async function u(e,t){if("POST"!==e.method)return t.status(405).end();try{let{bbox:n,date:r,size:a}=e.body||{};if(!n||!Array.isArray(n)||4!==n.length)return t.status(400).json({error:"bbox required [minx,miny,maxx,maxy]"});let[u,d,p,f]=n.map(Number),h=String(r||"").includes("/")?String(r):`${r||"2024-07-01"}/${r||"2024-07-10"}`,m=`${h.split("/")[0]}T00:00:00Z`,g=`${h.split("/")[1]}T23:59:59Z`,y=await s(),b="https://services.sentinel-hub.com/api/v1/process";if(y||(y=await o(),b="https://sh.dataspace.copernicus.eu/api/v1/process"),!y)return t.status(400).json({error:"sentinel_hub_not_configured"});let w={bounds:{bbox:[u,d,p,f],properties:{crs:"http://www.opengis.net/def/crs/OGC/1.3/CRS84"}},data:[{type:"S2L2A",dataFilter:{timeRange:{from:m,to:g},mosaickingOrder:"leastCC"}}]},E=await fetch(b,{method:"POST",headers:{Authorization:`Bearer ${y}`,"Content-Type":"application/json"},body:JSON.stringify({input:w,evalscript:l,output:{responses:[{identifier:"default",format:{type:"image/tiff"}}],width:a?.width||1024,height:a?.height||1024}})});if(!E.ok){let e=await E.text();return t.status(502).json({error:"process_failed",detail:e})}let _=await E.arrayBuffer(),v=await (0,i.fromArrayBuffer)(_),P=await v.getImage(),S=await P.readRasters({interleave:!0}),T=1,A=-1,x=0;for(let e=0;e<S.length;e++){let t=S[e];t<T&&(T=t),t>A&&(A=t),x+=t}let B=x/Math.max(1,S.length),C=await fetch(b,{method:"POST",headers:{Authorization:`Bearer ${y}`,"Content-Type":"application/json"},body:JSON.stringify({input:w,evalscript:c,output:{responses:[{identifier:"default",format:{type:"image/png"}}],width:a?.width||1024,height:a?.height||1024}})});if(!C.ok){let e=await C.text();return t.status(502).json({error:"png_failed",detail:e,ndviStats:{min:T,max:A,mean:B}})}let N=await C.arrayBuffer(),I=Buffer.from(N).toString("base64");return t.status(200).json({ndviStats:{min:T,max:A,mean:B},ndviPng:I,bbox:[u,d,p,f]})}catch(e){return console.error("sentinel-hub/fetch",e?.message||e),t.status(500).json({error:"internal"})}}r()}catch(e){r(e)}})},7153:(e,t)=>{var n;Object.defineProperty(t,"x",{enumerable:!0,get:function(){return n}}),function(e){e.PAGES="PAGES",e.PAGES_API="PAGES_API",e.APP_PAGE="APP_PAGE",e.APP_ROUTE="APP_ROUTE"}(n||(n={}))},1802:(e,t,n)=>{e.exports=n(145)}};var t=require("../../../webpack-api-runtime.js");t.C(e);var n=t(t.s=7092);module.exports=n})();
