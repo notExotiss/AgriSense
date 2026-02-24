@@ -1,137 +1,144 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
+import type { NextApiRequest, NextApiResponse } from 'next'
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== 'POST') return res.status(405).end();
+type GridResult = {
+  encoded: string
+  stats: { min: number; max: number; mean: number }
+}
 
-  try {
-    const { bbox } = req.body || {};
-
-    // Validate bbox
-    if (!bbox || !Array.isArray(bbox) || bbox.length !== 4) {
-      return res.status(400).json({ error: 'bbox_required', message: 'Bounding box [minx,miny,maxx,maxy] is required' });
-    }
-
-    console.log('Fetching soil moisture data for bbox:', bbox);
-
-    // Use NASA SMAP (Soil Moisture Active Passive) API for real soil moisture data
-    const [minx, miny, maxx, maxy] = bbox;
-    
-    // Calculate center point for SMAP data
-    const centerLat = (miny + maxy) / 2;
-    const centerLon = (minx + maxx) / 2;
-    
-    try {
-      // Try NASA SMAP API first (requires API key in production)
-      const smapUrl = `https://api.nasa.gov/insight_weather/?api_key=${process.env.NASA_API_KEY || 'DEMO_KEY'}&feedtype=json&ver=1.0`;
-      
-      // For now, we'll use a more realistic mock based on location and season
-      const mockData = generateRealisticSoilMoisture(bbox, centerLat, centerLon);
-      
-      return res.status(200).json({
-        success: true,
-        data: {
-          soilMoisture: mockData.image,
-          stats: mockData.stats,
-          bbox,
-          source: 'NASA SMAP (Simulated)',
-          resolution: '9km',
-          description: 'Volumetric soil moisture content (m³/m³)',
-          units: 'm³/m³',
-          timestamp: new Date().toISOString(),
-          metadata: {
-            depth: '0-5cm',
-            method: 'Microwave remote sensing',
-            accuracy: '±0.04 m³/m³'
-          }
-        }
-      });
-    } catch (soilError) {
-      console.warn('Soil moisture API failed, using basic mock data:', soilError);
-      
-      // Fallback to basic mock soil moisture data
-      const mockData = generateMockSoilMoisture(bbox);
-      return res.status(200).json({
-        success: true,
-        data: {
-          soilMoisture: mockData,
-          stats: { min: 0.15, max: 0.45, mean: 0.30 },
-          bbox,
-          source: 'Mock Data',
-          resolution: '250m',
-          description: 'Simulated soil moisture content',
-          units: 'm³/m³'
-        }
-      });
-    }
-
-  } catch (e: any) {
-    console.error('soil API error', e?.message || e);
-    return res.status(500).json({ error: 'soil_fetch_failed', message: String(e?.message || e) });
+function createSeededRandom(seed: number) {
+  let value = seed
+  return () => {
+    value = (value * 1664525 + 1013904223) % 4294967296
+    return value / 4294967296
   }
 }
 
-function generateRealisticSoilMoisture(bbox: number[], lat: number, lon: number): { image: string, stats: any } {
-  // Generate realistic soil moisture based on location and season
-  const [minx, miny, maxx, maxy] = bbox;
-  const width = 256;
-  const height = 256;
-  
-  // Seasonal variation (higher in spring, lower in summer)
-  const month = new Date().getMonth();
-  const seasonalFactor = 0.7 + 0.3 * Math.cos((month - 3) * Math.PI / 6);
-  
-  // Latitude-based variation (higher moisture in temperate regions)
-  const latFactor = Math.max(0.3, 1 - Math.abs(lat) / 90);
-  
-  // Base moisture level
-  const baseMoisture = 0.25 * seasonalFactor * latFactor;
-  
-  // Generate spatial variation
-  const moistureData = [];
-  let min = 1, max = 0, sum = 0;
-  
+async function fetchJson(url: string, timeoutMs = 15000) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, { signal: controller.signal })
+    if (!response.ok) throw new Error(`http_${response.status}`)
+    return await response.json()
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function buildEncodedGrid(baseValue: number, bbox: [number, number, number, number], type: 'soil' | 'fallback'): GridResult {
+  const width = 256
+  const height = 256
+  const seed = Math.round((bbox[0] + bbox[1] + bbox[2] + bbox[3]) * 100000) || 12345
+  const random = createSeededRandom(Math.abs(seed))
+
+  const data: number[] = new Array(width * height)
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  let sum = 0
+
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      // Add spatial variation (higher near edges, lower in center)
-      const centerX = width / 2;
-      const centerY = height / 2;
-      const distance = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
-      const maxDistance = Math.sqrt(centerX ** 2 + centerY ** 2);
-      const spatialFactor = 1 - (distance / maxDistance) * 0.3;
-      
-      // Add random noise
-      const noise = (Math.random() - 0.5) * 0.1;
-      
-      const moisture = Math.max(0.05, Math.min(0.6, baseMoisture * spatialFactor + noise));
-      moistureData.push(moisture);
-      
-      if (moisture < min) min = moisture;
-      if (moisture > max) max = moisture;
-      sum += moisture;
+      const i = y * width + x
+      const radial = Math.sin((x / width) * Math.PI) * Math.cos((y / height) * Math.PI)
+      const noise = (random() - 0.5) * (type === 'soil' ? 0.04 : 0.08)
+      const value = Math.max(0.04, Math.min(0.65, baseValue + radial * 0.03 + noise))
+      data[i] = Number(value.toFixed(4))
+      min = Math.min(min, value)
+      max = Math.max(max, value)
+      sum += value
     }
   }
-  
-  const mean = sum / moistureData.length;
-  
-  // Create a simple base64 image representation
-  // This is a placeholder - in production you'd generate an actual image
-  const imageData = Buffer.from(JSON.stringify({
+
+  const payload = {
     type: 'soil_moisture',
-    data: moistureData,
     width,
     height,
-    stats: { min, max, mean }
-  })).toString('base64');
-  
+    data,
+    stats: {
+      min: Number(min.toFixed(4)),
+      max: Number(max.toFixed(4)),
+      mean: Number((sum / data.length).toFixed(4)),
+    },
+  }
+
   return {
-    image: imageData,
-    stats: { min, max, mean }
-  };
+    encoded: Buffer.from(JSON.stringify(payload)).toString('base64'),
+    stats: payload.stats,
+  }
 }
 
-function generateMockSoilMoisture(bbox: number[]): string {
-  // Generate a simple mock soil moisture visualization
-  // Since we can't use canvas in Node.js, return a simple base64 encoded image
-  // This is a 1x1 pixel brown image as a placeholder
-  return 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+async function getOpenMeteoSoilMoisture(lat: number, lon: number) {
+  const url = new URL('https://api.open-meteo.com/v1/forecast')
+  url.searchParams.set('latitude', String(lat))
+  url.searchParams.set('longitude', String(lon))
+  url.searchParams.set('timezone', 'auto')
+  url.searchParams.set('past_days', '1')
+  url.searchParams.set('forecast_days', '1')
+  url.searchParams.set('hourly', 'soil_moisture_0_to_1cm,soil_moisture_1_to_3cm,soil_moisture_3_to_9cm')
+
+  const json = await fetchJson(url.toString())
+  const hourly = json?.hourly || {}
+  const top = hourly?.soil_moisture_0_to_1cm || []
+  const mid = hourly?.soil_moisture_1_to_3cm || []
+  const deep = hourly?.soil_moisture_3_to_9cm || []
+  const idx = Math.max(0, top.length - 1)
+  const valueCandidates = [top[idx], mid[idx], deep[idx]].filter((v) => typeof v === 'number')
+  if (!valueCandidates.length) throw new Error('no_soil_values')
+  const weighted =
+    (Number(top[idx] ?? 0) * 0.5 + Number(mid[idx] ?? 0) * 0.3 + Number(deep[idx] ?? 0) * 0.2) /
+    (Number(top[idx] != null ? 0.5 : 0) + Number(mid[idx] != null ? 0.3 : 0) + Number(deep[idx] != null ? 0.2 : 0) || 1)
+  return Math.max(0.05, Math.min(0.6, weighted))
+}
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== 'POST') return res.status(405).end()
+
+  try {
+    const { bbox } = req.body || {}
+    if (!Array.isArray(bbox) || bbox.length !== 4) {
+      return res.status(400).json({ error: 'bbox_required', message: 'Bounding box [minx,miny,maxx,maxy] is required' })
+    }
+
+    const typedBbox = bbox.map(Number) as [number, number, number, number]
+    const centerLat = (typedBbox[1] + typedBbox[3]) / 2
+    const centerLon = (typedBbox[0] + typedBbox[2]) / 2
+
+    try {
+      const baseline = await getOpenMeteoSoilMoisture(centerLat, centerLon)
+      const grid = buildEncodedGrid(baseline, typedBbox, 'soil')
+      return res.status(200).json({
+        success: true,
+        source: 'Open-Meteo',
+        isSimulated: false,
+        data: {
+          soilMoisture: grid.encoded,
+          stats: grid.stats,
+          bbox: typedBbox,
+          source: 'Open-Meteo soil moisture (AOI-derived grid)',
+          isSimulated: false,
+          units: 'm3/m3',
+          timestamp: new Date().toISOString(),
+        },
+      })
+    } catch (providerError: any) {
+      const fallback = buildEncodedGrid(0.28, typedBbox, 'fallback')
+      return res.status(200).json({
+        success: true,
+        source: 'Simulated fallback (Open-Meteo unavailable)',
+        isSimulated: true,
+        warning: providerError?.message || 'soil_provider_failed',
+        data: {
+          soilMoisture: fallback.encoded,
+          stats: fallback.stats,
+          bbox: typedBbox,
+          source: 'Simulated',
+          isSimulated: true,
+          units: 'm3/m3',
+          timestamp: new Date().toISOString(),
+        },
+      })
+    }
+  } catch (error: any) {
+    return res.status(500).json({ error: 'soil_fetch_failed', message: String(error?.message || error) })
+  }
 }

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react"
+﻿import React, { useState, useRef, useEffect } from "react"
 import NDVIUploader from "../components/NDVIUploader"
 import NDVICanvas from "../components/NDVICanvas"
 import NDVIProcessor from "../components/NDVIProcessor"
@@ -56,10 +56,14 @@ export default function Dashboard() {
 
   // Alert states
   const [alerts, setAlerts] = useState<any[]>([])
+  const [ingestWarnings, setIngestWarnings] = useState<string[]>([])
 
   // Phase 2 states
   const [timeSeriesData, setTimeSeriesData] = useState<any>(null)
   const [weatherData, setWeatherData] = useState<any>(null)
+  const [weatherMeta, setWeatherMeta] = useState<{ source?: string; isSimulated?: boolean }>({})
+  const [soilMeta, setSoilMeta] = useState<{ source?: string; isSimulated?: boolean }>({})
+  const [etMeta, setEtMeta] = useState<{ source?: string; isSimulated?: boolean }>({})
   const [analysisType, setAnalysisType] = useState<'basic' | 'weather' | 'trend' | 'comprehensive'>('basic')
   const [showInteractiveMap, setShowInteractiveMap] = useState(false)
   const [timeSeriesLoading, setTimeSeriesLoading] = useState(false)
@@ -74,7 +78,10 @@ export default function Dashboard() {
         if (!selectedLocation) return
         const r = await fetch('/api/weather', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ location: selectedLocation }) })
         const j = await r.json().catch(()=>null)
-        if (j) setWeatherData(j)
+        if (j){
+          setWeatherData(j.data || j)
+          setWeatherMeta({ source: j.source, isSimulated: j.isSimulated })
+        }
       } catch {}
     }
     load()
@@ -132,10 +139,12 @@ export default function Dashboard() {
     if (!state) return
     setSaving(true)
     try {
+      const signedInUser = await ensureSignedIn()
+      const idToken = await signedInUser.getIdToken()
       const previewPng = capturePreview()
       const response = await fetch("/api/items", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
         body: JSON.stringify({
           name: locationName || `Farm Plot ${new Date().toLocaleDateString()}`,
           ndviStats: state.stats,
@@ -146,6 +155,10 @@ export default function Dashboard() {
           locationName: locationName || selectedLocation?.name
         }),
       })
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}))
+        throw new Error(error?.message || `Save failed (${response.status})`)
+      }
       const result = await response.json()
       setSavedId(result.id)
       toast.success("Analysis saved successfully!")
@@ -201,28 +214,28 @@ export default function Dashboard() {
     let recommendations: string[] = []
 
     if (mean > 0.6) {
-      healthStatus = "🌱 Excellent vegetation health detected"
+      healthStatus = "ðŸŒ± Excellent vegetation health detected"
       recommendations = [
         "Continue current management practices",
         "Monitor for optimal harvest timing",
         "Consider precision fertilization for peak areas",
       ]
     } else if (mean > 0.4) {
-      healthStatus = "🌿 Good vegetation health with some variation"
+      healthStatus = "ðŸŒ¿ Good vegetation health with some variation"
       recommendations = [
         "Investigate areas with lower NDVI values",
         "Check irrigation uniformity across the field",
         "Consider targeted nutrient application",
       ]
     } else if (mean > 0.2) {
-      healthStatus = "⚠️ Moderate vegetation stress detected"
+      healthStatus = "âš ï¸ Moderate vegetation stress detected"
       recommendations = [
         "Immediate field inspection recommended",
         "Check for pest, disease, or water stress",
         "Consider soil testing in affected areas",
       ]
     } else {
-      healthStatus = "🚨 Significant vegetation stress or sparse coverage"
+      healthStatus = "ðŸš¨ Significant vegetation stress or sparse coverage"
       recommendations = [
         "Urgent field assessment required",
         "Investigate potential crop failure causes",
@@ -359,6 +372,7 @@ export default function Dashboard() {
     setNdviData(null)
     setSoilData(null)
     setEtData(null)
+    setIngestWarnings([])
     
     try {
       const bbox = bboxStr.split(',').map(s => Number(s.trim()))
@@ -367,11 +381,29 @@ export default function Dashboard() {
       const ndviResponse = await fetch('/api/ingest/fetch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bbox, date })
+        body: JSON.stringify({ bbox, date, targetSize: 512, policy: 'balanced' })
       })
-      if (!ndviResponse.ok) throw new Error('NDVI fetch failed')
-      const ndviResult = await ndviResponse.json()
-      setResult(ndviResult)
+      const ndviResult = await ndviResponse.json().catch(() => ({}))
+      if (!ndviResponse.ok || !ndviResult?.success) {
+        const firstProviderError = ndviResult?.providers?.[0]?.message
+        throw new Error(ndviResult?.message || firstProviderError || 'NDVI fetch failed')
+      }
+      const ingestData = ndviResult.data
+      setResult({ ...ingestData })
+      setIngestWarnings(Array.isArray(ndviResult.warnings) ? ndviResult.warnings : [])
+
+      if (ingestData?.ndvi?.previewPng) {
+        const readyNdvi = {
+          previewPng: ingestData.ndvi.previewPng,
+          width: ingestData.ndvi.width,
+          height: ingestData.ndvi.height,
+          stats: ingestData.ndvi.stats,
+          validPixelRatio: ingestData.ndvi.validPixelRatio,
+        }
+        setNdviData(readyNdvi)
+        setActiveResultLayer('ndvi')
+        checkThresholds(readyNdvi.stats)
+      }
       
       // Automatically fetch soil moisture data
       try {
@@ -384,6 +416,7 @@ export default function Dashboard() {
           const soilResult = await soilResponse.json()
           const transformed = await transformOverlayFromEncoded(soilResult.data, 'soil')
           setSoilData(transformed)
+          setSoilMeta({ source: soilResult?.source || soilResult?.data?.source, isSimulated: soilResult?.isSimulated ?? soilResult?.data?.isSimulated })
         }
       } catch (soilError) {
         console.warn('Soil data fetch failed:', soilError)
@@ -400,14 +433,15 @@ export default function Dashboard() {
           const etResult = await etResponse.json()
           const transformedET = await transformOverlayFromEncoded(etResult.data, 'et')
           setEtData(transformedET)
+          setEtMeta({ source: etResult?.source || etResult?.data?.source, isSimulated: etResult?.isSimulated ?? etResult?.data?.isSimulated })
         }
       } catch (etError) {
         console.warn('ET data fetch failed:', etError)
       }
       
-      toast.success('All data layers fetched successfully')
+      toast.success('Satellite analysis completed')
     } catch (e: any) {
-      toast.error(e?.message || 'Data fetch error')
+      toast.error(e?.message || 'Data fetch error', { description: 'Try adjusting date range or AOI size.' })
     } finally {
       setLoading(false)
     }
@@ -417,9 +451,11 @@ export default function Dashboard() {
     if (!ndviData) return toast.error('No NDVI data to save')
     setSaving(true)
     try {
+      const signedInUser = await ensureSignedIn()
+      const idToken = await signedInUser.getIdToken()
       const response = await fetch("/api/items", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
         body: JSON.stringify({
           name: locationName || `NDVI Analysis ${new Date().toLocaleDateString()}`,
           description: `Auto-ingested NDVI analysis for ${result?.imagery?.id || 'unknown imagery'}`,
@@ -440,11 +476,9 @@ export default function Dashboard() {
           } : null
         }),
       })
-      if (response.status === 401){
-        toast.error('Please sign in to save plots.')
-        await ensureSignedIn()
-        setSaving(false)
-        return
+      if (!response.ok){
+        const error = await response.json().catch(() => ({}))
+        throw new Error(error?.message || `Save failed (${response.status})`)
       }
       const result_data = await response.json()
       toast.success(`Plot saved with ID: ${result_data.id}`)
@@ -470,6 +504,7 @@ export default function Dashboard() {
       const data = await response.json()
       const transformed = await transformOverlayFromEncoded(data.data, 'soil')
       setSoilData(transformed)
+      setSoilMeta({ source: data?.source || data?.data?.source, isSimulated: data?.isSimulated ?? data?.data?.isSimulated })
       toast.success('Soil moisture data loaded')
     } catch (e: any) {
       toast.error(e?.message || 'Failed to fetch soil moisture')
@@ -492,6 +527,7 @@ export default function Dashboard() {
       const data = await response.json()
       const transformed = await transformOverlayFromEncoded(data.data, 'et')
       setEtData(transformed)
+      setEtMeta({ source: data?.source || data?.data?.source, isSimulated: data?.isSimulated ?? data?.data?.isSimulated })
       toast.success('Evapotranspiration data loaded')
     } catch (e: any) {
       toast.error(e?.message || 'Failed to fetch evapotranspiration')
@@ -616,7 +652,7 @@ export default function Dashboard() {
         id: `soil-dry-${timestamp}`,
         type: 'critical',
         message: 'Low Soil Moisture',
-        details: `Soil moisture (${soilData.stats.mean.toFixed(3)} m³/m³) is critically low. Irrigation recommended.`,
+        details: `Soil moisture (${soilData.stats.mean.toFixed(3)} mÂ³/mÂ³) is critically low. Irrigation recommended.`,
         timestamp,
         category: 'soil',
         severity: 'high'
@@ -626,7 +662,7 @@ export default function Dashboard() {
         id: `soil-moderate-${timestamp}`,
         type: 'warning',
         message: 'Moderate Soil Moisture',
-        details: `Soil moisture (${soilData.stats.mean.toFixed(3)} m³/m³) is below optimal. Consider irrigation.`,
+        details: `Soil moisture (${soilData.stats.mean.toFixed(3)} mÂ³/mÂ³) is below optimal. Consider irrigation.`,
         timestamp,
         category: 'soil',
         severity: 'medium'
@@ -647,12 +683,12 @@ export default function Dashboard() {
     }
     
     // Weather-based Alerts
-    if (weatherData?.current?.temperature > 35) {
+    if (weatherData?.current?.temperature > 95) {
       newAlerts.push({
         id: `temp-high-${timestamp}`,
         type: 'warning',
         message: 'High Temperature Alert',
-        details: `Temperature (${weatherData.current.temperature}°C) is very high. Increase irrigation frequency.`,
+        details: `Temperature (${weatherData.current.temperature}°F) is very high. Increase irrigation frequency.`,
         timestamp,
         category: 'weather',
         severity: 'medium'
@@ -901,7 +937,7 @@ export default function Dashboard() {
 
                   {savedId && (
                     <div className="text-sm text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 p-2 rounded">
-                      ✓ Analysis saved with ID: {savedId}
+                      âœ“ Analysis saved with ID: {savedId}
                     </div>
                   )}
                 </CardContent>
@@ -1009,7 +1045,7 @@ export default function Dashboard() {
                              onClick={geocode}
                              disabled={loading}
                            >
-                             {loading ? 'Searching…' : 'Find'}
+                             {loading ? 'Searchingâ€¦' : 'Find'}
                            </Button>
                          </div>
                          {suggestions.length > 0 && (
@@ -1067,7 +1103,7 @@ export default function Dashboard() {
                          disabled={loading || !bboxStr}
                          className="flex-1"
                        >
-                         {loading ? 'Fetching…' : 'Fetch Data'}
+                         {loading ? 'Fetchingâ€¦' : 'Fetch Data'}
                        </Button>
                        <Button
                          variant="outline"
@@ -1097,6 +1133,11 @@ export default function Dashboard() {
                date={date}
                searchLocation={selectedLocation}
              />
+             {weatherMeta?.source && (
+               <div className="text-xs text-muted-foreground mt-2">
+                 Weather source: {weatherMeta.source}{weatherMeta.isSimulated ? ' (Simulated)' : ''}
+               </div>
+             )}
 
             {result && (
               <div className="space-y-4">
@@ -1108,40 +1149,49 @@ export default function Dashboard() {
                     <div className="text-sm text-muted-foreground space-y-1">
                       <div className="break-words overflow-hidden">Imagery: <span className="break-all">{result.imagery?.id}</span></div>
                       <div className="break-words overflow-hidden">Date: <span className="break-all">{result.imagery?.date}</span></div>
-                      <div className="break-words overflow-hidden">Cloud Cover: {result.imagery?.cloudCover?.toFixed(1)}%</div>
+                      <div className="break-words overflow-hidden">Cloud Cover: {typeof result.imagery?.cloudCover === 'number' ? `${result.imagery.cloudCover.toFixed(1)}%` : 'N/A'}</div>
                       <div className="break-words overflow-hidden">Platform: <span className="break-all">{result.imagery?.platform}</span></div>
+                      <div className="break-words overflow-hidden">Provider: <span className="break-all">{result.provider || 'N/A'}</span></div>
+                      <div className="break-words overflow-hidden">Fallback Used: {result.fallbackUsed ? 'Yes' : 'No'}</div>
+                      <div className="break-words overflow-hidden">Valid Pixels: {ndviData?.validPixelRatio ? `${(ndviData.validPixelRatio * 100).toFixed(1)}%` : 'N/A'}</div>
                     </div>
-                    
-                    {result.message && (
-                      <div className="mt-3 p-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded text-xs text-blue-800 dark:text-blue-200 break-words overflow-hidden">
-                        {result.message}
+
+                    {ingestWarnings.length > 0 && (
+                      <div className="mt-3 p-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-xs text-amber-800 dark:text-amber-200 break-words overflow-hidden">
+                        {ingestWarnings.map((warning, idx) => (
+                          <div key={`${warning}-${idx}`}>- {warning}</div>
+                        ))}
                       </div>
                     )}
                   </CardContent>
                 </Card>
 
-                {result.assets && (
-                  <Card>
-                    <CardHeader className="pb-4">
-                      <CardTitle className="text-lg">NDVI Processing</CardTitle>
-                      <CardDescription>
-                        Process satellite imagery to generate NDVI heatmap
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-6">
-                      <NDVIProcessor 
-                        assets={result.assets} 
-                        onNDVIReady={(data) => {
-                          setNdviData(data)
-                          setActiveResultLayer('ndvi')
-                          // Load the other layers automatically once NDVI is ready
-                          fetchSoilMoisture()
-                          fetchEvapotranspiration()
-                          checkThresholds(data.stats)
-                          toast.success('NDVI analysis completed! Loaded Soil & ET layers.')
-                        }}
-                      />
-                      {ndviData && (
+                <Card>
+                  <CardHeader className="pb-4">
+                    <CardTitle className="text-lg">NDVI Analysis</CardTitle>
+                    <CardDescription>
+                      Server-side NDVI processing with free-data fallback chain.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    {result.assets && (
+                      <div className="rounded border p-3 space-y-3">
+                        <div className="text-xs text-muted-foreground">Manual client-side fallback processing</div>
+                        <NDVIProcessor 
+                          assets={result.assets} 
+                          onNDVIReady={(data) => {
+                            setNdviData(data)
+                            setActiveResultLayer('ndvi')
+                            fetchSoilMoisture()
+                            fetchEvapotranspiration()
+                            checkThresholds(data.stats)
+                            toast.success('Manual NDVI processing completed.')
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    {ndviData ? (
                         <div className="space-y-4">
                           {/* Show toggles only when soil & ET are both ready so all appear simultaneously */}
                           {soilData && etData && (
@@ -1186,9 +1236,9 @@ export default function Dashboard() {
                                       </div>
                                       <div className="mt-2 text-xs space-y-1">
                                         <div>Health: {(ndviData?.stats?.mean ? Math.round((ndviData.stats.mean+1)*50) : 75)}%</div>
-                                        <div>Soil Moisture: {soilData?.stats?.mean?.toFixed?.(2) ?? (0.25).toFixed(2)} m³/m³</div>
+                                        <div>Soil Moisture: {soilData?.stats?.mean?.toFixed?.(2) ?? (0.25).toFixed(2)} mÂ³/mÂ³</div>
                                         <div>ET: {etData?.stats?.mean?.toFixed?.(1) ?? (3.5).toFixed(1)} mm/day</div>
-                                        <div className="text-muted-foreground">Sprinkler: Auto mode • Next run: 6:00 AM</div>
+                                        <div className="text-muted-foreground">Sprinkler: Auto mode â€¢ Next run: 6:00 AM</div>
                                       </div>
                                     </div>
                                   )}
@@ -1208,12 +1258,22 @@ export default function Dashboard() {
                                   </div>
                                   <div>
                                     <div className="font-medium mb-1">Soil Moisture</div>
+                                    {soilMeta?.source && (
+                                      <div className="text-[11px] text-muted-foreground mb-1">
+                                        Source: {soilMeta.source}{soilMeta.isSimulated ? ' (Simulated)' : ''}
+                                      </div>
+                                    )}
                                     <div className="flex items-center gap-2 mb-1"><div className="w-4 h-4 bg-amber-800 rounded"/> <span>Dry</span></div>
                                     <div className="flex items-center gap-2 mb-1"><div className="w-4 h-4 bg-amber-400 rounded"/> <span>Moderate</span></div>
                                     <div className="flex items-center gap-2"><div className="w-4 h-4 bg-blue-500 rounded"/> <span>Wet</span></div>
                                   </div>
                                   <div>
                                     <div className="font-medium mb-1">Evapotranspiration</div>
+                                    {etMeta?.source && (
+                                      <div className="text-[11px] text-muted-foreground mb-1">
+                                        Source: {etMeta.source}{etMeta.isSimulated ? ' (Simulated)' : ''}
+                                      </div>
+                                    )}
                                     <div className="flex items-center gap-2 mb-1"><div className="w-4 h-4 bg-red-500 rounded"/> <span>Low (0-2 mm/day)</span></div>
                                     <div className="flex items-center gap-2 mb-1"><div className="w-4 h-4 bg-yellow-500 rounded"/> <span>Moderate (2-4)</span></div>
                                     <div className="flex items-center gap-2"><div className="w-4 h-4 bg-green-500 rounded"/> <span>High (4+)</span></div>
@@ -1246,10 +1306,13 @@ export default function Dashboard() {
                             </div>
                           </div>
                         </div>
-                      )}
-                    </CardContent>
-                  </Card>
-                )}
+                    ) : (
+                      <div className="text-sm text-muted-foreground">
+                        NDVI preview is not available for this request.
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
 
                 {ndviData && (
                   <div className="flex gap-2">
@@ -1489,3 +1552,6 @@ export default function Dashboard() {
  }
 
 // Mount chatbot with context at app bottom
+
+
+

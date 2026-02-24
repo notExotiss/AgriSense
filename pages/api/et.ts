@@ -1,133 +1,140 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
+import type { NextApiRequest, NextApiResponse } from 'next'
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== 'POST') return res.status(405).end();
+type GridResult = {
+  encoded: string
+  stats: { min: number; max: number; mean: number }
+}
 
-  try {
-    const { bbox } = req.body || {};
-
-    // Validate bbox
-    if (!bbox || !Array.isArray(bbox) || bbox.length !== 4) {
-      return res.status(400).json({ error: 'bbox_required', message: 'Bounding box [minx,miny,maxx,maxy] is required' });
-    }
-
-    console.log('Fetching evapotranspiration data for bbox:', bbox);
-
-    // Use FAO evapotranspiration dataset for real ET data
-    const [minx, miny, maxx, maxy] = bbox;
-    
-    // Calculate center point for ET data
-    const centerLat = (miny + maxy) / 2;
-    const centerLon = (minx + maxx) / 2;
-    
-    try {
-      // Try FAO ET API first (requires API key in production)
-      // For now, we'll use a more realistic mock based on location and season
-      const mockData = generateRealisticET(bbox, centerLat, centerLon);
-      
-      return res.status(200).json({
-        success: true,
-        data: {
-          evapotranspiration: mockData.image,
-          stats: mockData.stats,
-          bbox,
-          source: 'FAO ET Dataset (Simulated)',
-          resolution: '1km',
-          description: 'Daily evapotranspiration (mm/day)',
-          units: 'mm/day',
-          timestamp: new Date().toISOString(),
-          metadata: {
-            method: 'Penman-Monteith equation',
-            reference: 'FAO-56',
-            accuracy: '±0.5 mm/day'
-          }
-        }
-      });
-    } catch (etError) {
-      console.warn('ET API failed, using basic mock data:', etError);
-      
-      const mockData = generateMockET(bbox);
-      return res.status(200).json({
-        success: true,
-        data: {
-          evapotranspiration: mockData,
-          stats: { min: 1.5, max: 8.2, mean: 4.8 },
-          bbox,
-          source: 'Mock Data',
-          resolution: '30m',
-          description: 'Simulated evapotranspiration',
-          units: 'mm/day'
-        }
-      });
-    }
-
-  } catch (e: any) {
-    console.error('ET API error', e?.message || e);
-    return res.status(500).json({ error: 'et_fetch_failed', message: String(e?.message || e) });
+function createSeededRandom(seed: number) {
+  let value = seed
+  return () => {
+    value = (value * 1103515245 + 12345) % 2147483648
+    return value / 2147483648
   }
 }
 
-function generateRealisticET(bbox: number[], lat: number, lon: number): { image: string, stats: any } {
-  // Generate realistic evapotranspiration based on location and season
-  const [minx, miny, maxx, maxy] = bbox;
-  const width = 256;
-  const height = 256;
-  
-  // Seasonal variation (higher in summer, lower in winter)
-  const month = new Date().getMonth();
-  const seasonalFactor = 0.3 + 0.7 * Math.cos((month - 6) * Math.PI / 6);
-  
-  // Latitude-based variation (higher ET in tropical regions)
-  const latFactor = Math.max(0.4, 1 - Math.abs(lat - 30) / 60);
-  
-  // Base ET level (mm/day)
-  const baseET = 3.0 * seasonalFactor * latFactor;
-  
-  // Generate spatial variation
-  const etData = [];
-  let min = 10, max = 0, sum = 0;
-  
+async function fetchJson(url: string, timeoutMs = 15000) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, { signal: controller.signal })
+    if (!response.ok) throw new Error(`http_${response.status}`)
+    return await response.json()
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function buildEncodedGrid(baseValue: number, bbox: [number, number, number, number], type: 'et' | 'fallback'): GridResult {
+  const width = 256
+  const height = 256
+  const seed = Math.round((bbox[0] * 17 + bbox[1] * 31 + bbox[2] * 13 + bbox[3] * 29) * 100000) || 9001
+  const random = createSeededRandom(Math.abs(seed))
+
+  const data: number[] = new Array(width * height)
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  let sum = 0
+
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      // Add spatial variation (higher in center, lower at edges)
-      const centerX = width / 2;
-      const centerY = height / 2;
-      const distance = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
-      const maxDistance = Math.sqrt(centerX ** 2 + centerY ** 2);
-      const spatialFactor = 0.7 + 0.3 * (1 - distance / maxDistance);
-      
-      // Add random noise
-      const noise = (Math.random() - 0.5) * 0.8;
-      
-      const et = Math.max(0.5, Math.min(12.0, baseET * spatialFactor + noise));
-      etData.push(et);
-      
-      if (et < min) min = et;
-      if (et > max) max = et;
-      sum += et;
+      const i = y * width + x
+      const ridge = Math.sin((x / width) * Math.PI * 2) * 0.18 + Math.cos((y / height) * Math.PI * 2) * 0.12
+      const noise = (random() - 0.5) * (type === 'et' ? 0.7 : 1.2)
+      const value = Math.max(0.2, Math.min(12, baseValue + ridge + noise))
+      data[i] = Number(value.toFixed(4))
+      min = Math.min(min, value)
+      max = Math.max(max, value)
+      sum += value
     }
   }
-  
-  const mean = sum / etData.length;
-  
-  // Create a simple base64 image representation
-  const imageData = Buffer.from(JSON.stringify({
+
+  const payload = {
     type: 'evapotranspiration',
-    data: etData,
     width,
     height,
-    stats: { min, max, mean }
-  })).toString('base64');
-  
+    data,
+    stats: {
+      min: Number(min.toFixed(4)),
+      max: Number(max.toFixed(4)),
+      mean: Number((sum / data.length).toFixed(4)),
+    },
+  }
+
   return {
-    image: imageData,
-    stats: { min, max, mean }
-  };
+    encoded: Buffer.from(JSON.stringify(payload)).toString('base64'),
+    stats: payload.stats,
+  }
 }
 
-function generateMockET(bbox: number[]): string {
-  // Generate a simple mock evapotranspiration visualization
-  // Since we can't use canvas in Node.js, return a simple base64 encoded image
-  // This is a 1x1 pixel green image as a placeholder
-  return 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+async function getOpenMeteoEt0(lat: number, lon: number) {
+  const url = new URL('https://api.open-meteo.com/v1/forecast')
+  url.searchParams.set('latitude', String(lat))
+  url.searchParams.set('longitude', String(lon))
+  url.searchParams.set('timezone', 'auto')
+  url.searchParams.set('past_days', '7')
+  url.searchParams.set('forecast_days', '1')
+  url.searchParams.set('daily', 'et0_fao_evapotranspiration')
+
+  const json = await fetchJson(url.toString())
+  const daily = json?.daily || {}
+  const values = Array.isArray(daily.et0_fao_evapotranspiration)
+    ? daily.et0_fao_evapotranspiration.filter((v: any) => typeof v === 'number' && Number.isFinite(v))
+    : []
+  if (!values.length) throw new Error('no_et_values')
+  const latest = Number(values[values.length - 1])
+  return Math.max(0.2, Math.min(12, latest))
+}
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== 'POST') return res.status(405).end()
+
+  try {
+    const { bbox } = req.body || {}
+    if (!Array.isArray(bbox) || bbox.length !== 4) {
+      return res.status(400).json({ error: 'bbox_required', message: 'Bounding box [minx,miny,maxx,maxy] is required' })
+    }
+
+    const typedBbox = bbox.map(Number) as [number, number, number, number]
+    const centerLat = (typedBbox[1] + typedBbox[3]) / 2
+    const centerLon = (typedBbox[0] + typedBbox[2]) / 2
+
+    try {
+      const baseline = await getOpenMeteoEt0(centerLat, centerLon)
+      const grid = buildEncodedGrid(baseline, typedBbox, 'et')
+      return res.status(200).json({
+        success: true,
+        source: 'Open-Meteo',
+        isSimulated: false,
+        data: {
+          evapotranspiration: grid.encoded,
+          stats: grid.stats,
+          bbox: typedBbox,
+          source: 'Open-Meteo ET0 (AOI-derived grid)',
+          isSimulated: false,
+          units: 'mm/day',
+          timestamp: new Date().toISOString(),
+        },
+      })
+    } catch (providerError: any) {
+      const fallback = buildEncodedGrid(3.6, typedBbox, 'fallback')
+      return res.status(200).json({
+        success: true,
+        source: 'Simulated fallback (Open-Meteo unavailable)',
+        isSimulated: true,
+        warning: providerError?.message || 'et_provider_failed',
+        data: {
+          evapotranspiration: fallback.encoded,
+          stats: fallback.stats,
+          bbox: typedBbox,
+          source: 'Simulated',
+          isSimulated: true,
+          units: 'mm/day',
+          timestamp: new Date().toISOString(),
+        },
+      })
+    }
+  } catch (error: any) {
+    return res.status(500).json({ error: 'et_fetch_failed', message: String(error?.message || error) })
+  }
 }

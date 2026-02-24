@@ -80,6 +80,8 @@ export default function WeatherWidget({ bbox, date, searchLocation }: WeatherWid
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastFetchBbox, setLastFetchBbox] = useState<string | null>(null);
+  const [source, setSource] = useState<string>('');
+  const [isSimulated, setIsSimulated] = useState(false);
 
   useEffect(() => {
     // Use searchLocation if provided, otherwise use bbox
@@ -111,6 +113,8 @@ export default function WeatherWidget({ bbox, date, searchLocation }: WeatherWid
         
         if (result.data) {
           setWeatherData(result.data);
+          setSource(result.source || '');
+          setIsSimulated(Boolean(result.isSimulated));
         } else {
           throw new Error('No weather data received');
         }
@@ -192,6 +196,11 @@ export default function WeatherWidget({ bbox, date, searchLocation }: WeatherWid
         <p className="text-sm text-muted-foreground">
           {location.name}{location.state ? `, ${location.state}` : ''}{location.country ? `, ${location.country}` : ''}
         </p>
+        {source && (
+          <p className="text-xs text-muted-foreground">
+            Source: {source}{isSimulated ? ' (Simulated)' : ''}
+          </p>
+        )}
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Current Weather */}
