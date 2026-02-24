@@ -1,18 +1,20 @@
 import { useEffect, useState } from 'react'
 import NavBar from '../components/NavBar'
-import { auth } from '../lib/firebaseClient'
+import { auth, isFirebaseClientConfigured } from '../lib/firebaseClient'
 import Link from 'next/link'
 import { Button } from '../components/ui/button'
 import { toast } from 'sonner'
 import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect } from 'firebase/auth'
 
 export default function Plots(){
+  const authConfigured = isFirebaseClientConfigured
   const [plots, setPlots] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [user, setUser] = useState<any>(null)
   const [authLoading, setAuthLoading] = useState(true)
 
   async function signIn(){
+    if (!authConfigured || !auth) return toast.error('Firebase Auth is not configured.')
     const provider = new GoogleAuthProvider()
     try{
       await signInWithPopup(auth, provider)
@@ -38,6 +40,13 @@ export default function Plots(){
   }
 
   useEffect(()=>{
+    if (!authConfigured || !auth){
+      setUser(null)
+      setPlots([])
+      setAuthLoading(false)
+      return
+    }
+
     return onAuthStateChanged(auth, (u)=>{
       setUser(u)
       setAuthLoading(false)
@@ -57,6 +66,7 @@ export default function Plots(){
 
   async function remove(id:string){
     try{
+      if (!authConfigured || !auth) return toast.error('Firebase Auth is not configured.')
       const u = auth.currentUser
       if (!u) return toast.error('Please sign in')
       const token = await u.getIdToken()
@@ -77,6 +87,12 @@ export default function Plots(){
         
         {authLoading ? (
           <div className="text-sm text-muted-foreground">Loading...</div>
+        ) : !authConfigured ? (
+          <div className="rounded border bg-card p-4">
+            <p className="text-sm text-muted-foreground">
+              Firebase Auth is not configured. Set `NEXT_PUBLIC_FIREBASE_*` variables in Vercel project settings.
+            </p>
+          </div>
         ) : !user ? (
           <div className="rounded border bg-card p-4">
             <p className="text-sm text-muted-foreground mb-3">Sign in to view your saved plots.</p>

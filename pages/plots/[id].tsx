@@ -1,16 +1,21 @@
 import { useRouter } from 'next/router'
 import { useEffect, useState } from 'react'
 import NavBar from '../../components/NavBar'
-import { auth } from '../../lib/firebaseClient'
+import { auth, isFirebaseClientConfigured } from '../../lib/firebaseClient'
 import TimeSeriesChart from '../../components/TimeSeriesChart'
 
 export default function PlotDetail(){
+  const authConfigured = isFirebaseClientConfigured
   const router = useRouter()
   const { id } = router.query
   const [series, setSeries] = useState<{ date:string, ndviStats:{ mean:number } }[]>([])
 
   useEffect(()=>{
     if (!id) return
+    if (!authConfigured || !auth){
+      setSeries([])
+      return
+    }
     (async()=>{
       const u = auth.currentUser
       if (!u) return

@@ -1,15 +1,22 @@
 import { useEffect, useState } from 'react'
 import NavBar from '../components/NavBar'
 import { Button } from '../components/ui/button'
-import { auth } from '../lib/firebaseClient'
+import { auth, isFirebaseClientConfigured } from '../lib/firebaseClient'
 import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut } from 'firebase/auth'
 
 export default function Account(){
+  const authConfigured = isFirebaseClientConfigured
   const [user, setUser] = useState<any>(null)
   const [plots, setPlots] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
 
   useEffect(()=>{
+    if (!authConfigured || !auth){
+      setUser(null)
+      setPlots([])
+      return
+    }
+
     return onAuthStateChanged(auth, async (u)=>{
       setUser(u)
       if (u){
@@ -24,6 +31,7 @@ export default function Account(){
   },[])
 
   async function signIn(){
+    if (!authConfigured || !auth) return
     const provider = new GoogleAuthProvider()
     try{
       await signInWithPopup(auth, provider)
@@ -33,6 +41,7 @@ export default function Account(){
   }
 
   async function doSignOut(){
+    if (!authConfigured || !auth) return
     await signOut(auth)
   }
 
@@ -41,7 +50,13 @@ export default function Account(){
       <NavBar />
       <main className="max-w-6xl mx-auto p-6">
         <h1 className="text-2xl font-bold mb-2">Account</h1>
-        {!user ? (
+        {!authConfigured ? (
+          <div className="rounded border bg-card p-4">
+            <p className="text-sm text-muted-foreground">
+              Firebase Auth is not configured. Set `NEXT_PUBLIC_FIREBASE_*` variables in Vercel project settings.
+            </p>
+          </div>
+        ) : !user ? (
           <div className="rounded border bg-card p-4">
             <p className="text-sm text-muted-foreground mb-3">Sign in to save and manage your plots.</p>
             <Button onClick={signIn}>Sign in with Google</Button>

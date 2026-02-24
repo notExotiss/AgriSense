@@ -10,7 +10,7 @@ import { Button } from "../components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card"
 import { Badge } from "../components/ui/badge"
 import { Leaf, Satellite, TrendingUp, AlertTriangle, Upload, MapPin, Download, Layers, AlertCircle, BarChart3, Cloud, Globe, Plus } from "lucide-react"
-import { auth } from "../lib/firebaseClient"
+import { auth, isFirebaseClientConfigured } from "../lib/firebaseClient"
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signInWithRedirect } from 'firebase/auth'
 import dynamic from 'next/dynamic'
 import { toast } from 'sonner'
@@ -26,6 +26,7 @@ type NDVIState = {
 }
 
 export default function Dashboard() {
+  const authConfigured = isFirebaseClientConfigured
   const [activeTab, setActiveTab] = useState("auto-ingest")
   const [state, setState] = useState<NDVIState | null>(null)
   const [saving, setSaving] = useState(false)
@@ -79,7 +80,13 @@ export default function Dashboard() {
     load()
   }, [selectedLocation?.lat, selectedLocation?.lon])
 
-  useEffect(() => onAuthStateChanged(auth, setUser), [])
+  useEffect(() => {
+    if (!authConfigured || !auth){
+      setUser(null)
+      return
+    }
+    return onAuthStateChanged(auth, setUser)
+  }, [])
 
   // Push alerts to NavBar popup
   useEffect(()=>{
@@ -103,6 +110,7 @@ export default function Dashboard() {
   }, [aiAnalysis])
 
   async function ensureSignedIn(){
+    if (!authConfigured || !auth) throw new Error('Firebase Auth is not configured')
     if (auth.currentUser) return auth.currentUser
     const provider = new GoogleAuthProvider()
     try{ const cred = await signInWithPopup(auth, provider); return cred.user } catch {
