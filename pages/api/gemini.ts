@@ -140,6 +140,18 @@ function explainLlmFailure(lastFailure?: string, retryAfterMs?: number) {
     }
   }
 
+  if (failure.includes('gemini_key_missing')) {
+    return {
+      answer: `Gemini is unavailable because no API key is configured.${retryText}`,
+      rationale: 'The server is missing GEMINI_API_KEY (or equivalent server-side key variable).',
+      actions: [
+        'Set GEMINI_API_KEY in Vercel Project Settings for Production/Preview/Development as needed.',
+        'Redeploy so the serverless function picks up the new environment variable.',
+        'Keep the key server-side only; do not rely on NEXT_PUBLIC_* for production auth.',
+      ],
+    }
+  }
+
   if (failure.includes('gemini_key_invalid') || failure.includes('permission_denied')) {
     return {
       answer: `Gemini rejected the API credentials for this request.${retryText}`,
@@ -239,16 +251,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       })
     }
 
+    const fallbackMode = chat.backend === 'unavailable'
+    const fallbackWarning = llmUnavailable?.lastFailure || llmUnavailable?.message || null
     return res.status(200).json({
       success: true,
-      unavailable: false,
+      unavailable: fallbackMode || Boolean(chat.unavailable),
+      retryAfterMs: chat.retryAfterMs || llmUnavailable?.retryAfterMs,
       answer: chat.answer,
       sections: chat.sections,
       renderModel: chat.renderModel,
       usedHistory: chat.usedHistory,
       suggestion: chat.text,
       output: chat.text,
-      assistantBackend: chat.backend || 'llm-gemini',
+      assistantBackend: fallbackMode ? 'unavailable' : chat.backend || 'llm-gemini',
+      warnings: fallbackWarning ? [fallbackWarning] : [],
       model: inference.engine,
       engine: inference.engine,
       confidence: inference.confidence,

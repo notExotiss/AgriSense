@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { computeAnomalyScore } from './anomaly'
+import { composeChatResponse } from './chat'
 import { buildDataQuality, buildFeatureVector } from './feature-engineering'
 import { forecastNdvi } from './forecasting'
 import { computeZoneClusters } from './kmeans'
@@ -124,6 +125,26 @@ export async function runMlChat(input: MLInput) {
         attemptedModels: [],
         retries: 0,
       }
+    }
+  }
+
+  if (!chat) {
+    const fallbackChat = composeChatResponse({
+      prompt,
+      mode: input.mode,
+      selectedCell: input.selectedCell || input?.context?.selectedCell || null,
+      inference,
+      history: input.history,
+    })
+    chat = {
+      ...fallbackChat,
+      backend: 'unavailable',
+      llmAttemptedModels: llmUnavailable?.attemptedModels || [],
+      llmFinalModel: null,
+      llmRetries: Number(llmUnavailable?.retries || 0),
+      llmDegraded: true,
+      unavailable: true,
+      retryAfterMs: llmUnavailable?.retryAfterMs,
     }
   }
 

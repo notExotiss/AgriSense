@@ -259,10 +259,16 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 
 function extractGeminiText(payload: any) {
   const candidates = Array.isArray(payload?.candidates) ? payload.candidates : []
-  const first = candidates[0]
-  const parts = Array.isArray(first?.content?.parts) ? first.content.parts : []
-  const textPart = parts.find((part: any) => typeof part?.text === 'string')
-  return String(textPart?.text || '').trim()
+  const texts: string[] = []
+  for (const candidate of candidates) {
+    const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : []
+    for (const part of parts) {
+      if (typeof part?.text === 'string' && part.text.trim()) {
+        texts.push(part.text.trim())
+      }
+    }
+  }
+  return texts.join('\n').trim()
 }
 
 async function requestGeminiContent(
@@ -331,8 +337,18 @@ function parseGeminiError(text: string) {
 }
 
 export async function composeLlmChatResponse(input: LlmComposeInput): Promise<MLChatResponse | null> {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.AGRISENSE_GEMINI_API_KEY
-  if (!apiKey) return null
+  const apiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.AGRISENSE_GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.NEXT_PUBLIC_GEMINI_API_KEY
+  if (!apiKey) {
+    throw new GeminiUnavailableError('gemini_api_key_missing', {
+      attemptedModels: [],
+      retries: 0,
+      lastFailure: 'gemini_key_missing',
+    })
+  }
 
   const intent = classifyIntent(input.prompt || '')
   const history = normalizeHistory(input.history)
@@ -447,6 +463,11 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
       }
 
       const payload = await response.json().catch(() => null)
+      const promptBlocked = String(payload?.promptFeedback?.blockReason || '').trim()
+      if (promptBlocked) {
+        lastFailure = `gemini_prompt_blocked:${promptBlocked}`
+        break
+      }
       const rawText = extractGeminiText(payload)
       if (!rawText) {
         lastFailure = 'gemini_empty_response'
