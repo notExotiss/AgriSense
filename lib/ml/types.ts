@@ -122,7 +122,7 @@ export type MLInferenceResult = {
 export type MLChatResponse = {
   mode: 'status' | 'irrigation-plan' | 'stress-debug' | 'forecast' | 'next-actions' | 'what-if-explainer'
   renderModel: 'qa' | 'status' | 'what-if'
-  backend?: 'llm-gemini' | 'deterministic'
+  backend?: 'llm-gemini' | 'unavailable'
   intent: ChatIntent
   intentConfidence: number
   usedHistory: boolean
@@ -139,6 +139,8 @@ export type MLChatResponse = {
   llmFinalModel?: string | null
   llmRetries?: number
   llmDegraded?: boolean
+  unavailable?: boolean
+  retryAfterMs?: number
 }
 
 export type MLInput = {

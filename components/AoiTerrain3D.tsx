@@ -302,6 +302,65 @@ function sampleHeight(
   return lerp(top, bottom, ty)
 }
 
+function createEdgeSkirtGeometry(
+  edge: 'north' | 'south' | 'east' | 'west',
+  segments: number,
+  sampleHeightFn: (u: number, v: number) => number,
+  planeWidth: number,
+  planeHeight: number,
+  baseY: number
+) {
+  const vertices: number[] = []
+  const uvs: number[] = []
+  const indices: number[] = []
+  const outset = 2.6
+
+  for (let i = 0; i <= segments; i++) {
+    const t = i / Math.max(1, segments)
+    let u = t
+    let v = t
+    if (edge === 'north') {
+      u = t
+      v = 0
+    } else if (edge === 'south') {
+      u = t
+      v = 1
+    } else if (edge === 'west') {
+      u = 0
+      v = t
+    } else {
+      u = 1
+      v = t
+    }
+    const x = -planeWidth / 2 + u * planeWidth
+    const z = -planeHeight / 2 + v * planeHeight
+    const topY = sampleHeightFn(u, v) + 0.04
+    let bottomX = x
+    let bottomZ = z
+    if (edge === 'north') bottomZ -= outset
+    if (edge === 'south') bottomZ += outset
+    if (edge === 'west') bottomX -= outset
+    if (edge === 'east') bottomX += outset
+    vertices.push(x, topY, z)
+    vertices.push(bottomX, baseY, bottomZ)
+    uvs.push(u, v)
+    uvs.push(u, v)
+  }
+
+  for (let i = 0; i < segments; i++) {
+    const offset = i * 2
+    indices.push(offset, offset + 1, offset + 2)
+    indices.push(offset + 1, offset + 3, offset + 2)
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  geometry.setIndex(indices)
+  geometry.computeVertexNormals()
+  return geometry
+}
+
 function createDotSprite(color: string) {
   const canvas = document.createElement('canvas')
   canvas.width = 64
@@ -400,6 +459,19 @@ export default function AoiTerrain3D({
   const [metricRange, setMetricRange] = useState<{ min: number; max: number } | null>(null)
   const selected = useMemo(() => parseCell(selectedCell), [selectedCell])
   const selectedLabel = useMemo(() => labelForCell(selectedCell), [selectedCell])
+  const [isDarkTheme, setIsDarkTheme] = useState(() =>
+    typeof document !== 'undefined' ? document.documentElement.classList.contains('dark') : false
+  )
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    const root = document.documentElement
+    const updateTheme = () => setIsDarkTheme(root.classList.contains('dark'))
+    updateTheme()
+    const observer = new MutationObserver(updateTheme)
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] })
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     if (!open || !bbox) return
@@ -476,7 +548,6 @@ export default function AoiTerrain3D({
 
     const container = mountRef.current
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0x090f1a)
 
     const widthPx = container.clientWidth || 1000
     const heightPx = container.clientHeight || 420
@@ -484,12 +555,13 @@ export default function AoiTerrain3D({
     const camera = new THREE.PerspectiveCamera(50, widthPx / heightPx, 0.1, 1400)
     camera.position.set(0, 90, 148)
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
     renderer.setSize(widthPx, heightPx)
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.toneMapping = THREE.ACESFilmicToneMapping
     renderer.toneMappingExposure = 1.02
+    renderer.setClearColor(0x000000, 0)
 
     container.innerHTML = ''
     container.appendChild(renderer.domElement)
@@ -502,12 +574,12 @@ export default function AoiTerrain3D({
     controls.maxDistance = 260
     controls.target.set(0, 6, 0)
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.58))
-    const keyLight = new THREE.DirectionalLight(0xf4fbff, 1.02)
-    keyLight.position.set(130, 140, 60)
+    scene.add(new THREE.AmbientLight(0xffffff, isDarkTheme ? 0.74 : 0.66))
+    const keyLight = new THREE.DirectionalLight(0xf4fbff, isDarkTheme ? 1.12 : 1.04)
+    keyLight.position.set(130, 142, 60)
     scene.add(keyLight)
-    const fillLight = new THREE.DirectionalLight(0x8ab6ff, 0.42)
-    fillLight.position.set(-120, 80, -120)
+    const fillLight = new THREE.DirectionalLight(isDarkTheme ? 0x90b4ff : 0xa2bbd8, isDarkTheme ? 0.5 : 0.42)
+    fillLight.position.set(-120, 84, -120)
     scene.add(fillLight)
 
     const smoothingPasses = quality === 'high' ? 4 : quality === 'balanced' ? 2 : 1
@@ -535,39 +607,77 @@ export default function AoiTerrain3D({
     position.needsUpdate = true
     geometry.computeVertexNormals()
 
-    const slabGeo = new THREE.BoxGeometry(planeWidth + 6, 9.5, planeHeight + 6)
-    const slabMat = new THREE.MeshStandardMaterial({
-      color: 0x6b7280,
-      roughness: 0.78,
+    const baseMaterial = new THREE.MeshStandardMaterial({
+      color: isDarkTheme ? 0x5f7187 : 0x93a0ae,
       metalness: 0.03,
-    })
-    const slabMesh = new THREE.Mesh(slabGeo, slabMat)
-    slabMesh.position.set(0, -6.5, 0)
-    scene.add(slabMesh)
-
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x7d8fa1,
-      metalness: 0.04,
-      roughness: 0.86,
+      roughness: 0.9,
     })
 
-    const terrainMesh = new THREE.Mesh(geometry, material)
+    const terrainMesh = new THREE.Mesh(geometry, baseMaterial)
     terrainMesh.rotation.x = -Math.PI / 2
     scene.add(terrainMesh)
 
+    const colorOverlayMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.96,
+      side: THREE.DoubleSide,
+    })
+    const colorOverlayMesh = new THREE.Mesh(geometry, colorOverlayMaterial)
+    colorOverlayMesh.rotation.x = -Math.PI / 2
+    colorOverlayMesh.position.y = 0.18
+    scene.add(colorOverlayMesh)
+
     const subtleFrame = new THREE.LineSegments(
       new THREE.WireframeGeometry(geometry),
-      new THREE.LineBasicMaterial({ color: 0x0f172a, transparent: true, opacity: 0.075 })
+      new THREE.LineBasicMaterial({
+        color: isDarkTheme ? 0x99afc8 : 0x2a3e52,
+        transparent: true,
+        opacity: isDarkTheme ? 0.14 : 0.1,
+      })
     )
     subtleFrame.rotation.x = -Math.PI / 2
     scene.add(subtleFrame)
+
+    const skirtBaseY = -1.35
+    const sampleHeightOnMesh = (u: number, v: number) => sampleHeight(scaledHeight, terrain.width, terrain.height, u, v)
+    const skirtMaterial = new THREE.MeshStandardMaterial({
+      color: isDarkTheme ? 0x58728e : 0x8ca3b7,
+      roughness: 0.92,
+      metalness: 0.01,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.96,
+    })
+    const skirtMeshes: THREE.Mesh[] = []
+    for (const edge of ['north', 'south', 'west', 'east'] as const) {
+      const segments = edge === 'north' || edge === 'south' ? terrain.width - 1 : terrain.height - 1
+      const skirtGeometry = createEdgeSkirtGeometry(edge, segments, sampleHeightOnMesh, planeWidth, planeHeight, skirtBaseY)
+      const skirtMesh = new THREE.Mesh(skirtGeometry, skirtMaterial)
+      scene.add(skirtMesh)
+      skirtMeshes.push(skirtMesh)
+    }
+
+    const bottomGeo = new THREE.PlaneGeometry(planeWidth, planeHeight)
+    const bottomMat = new THREE.MeshStandardMaterial({
+      color: isDarkTheme ? 0x36506a : 0xa5b8c8,
+      roughness: 0.94,
+      metalness: 0.0,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.94,
+    })
+    const bottomMesh = new THREE.Mesh(bottomGeo, bottomMat)
+    bottomMesh.rotation.x = -Math.PI / 2
+    bottomMesh.position.y = skirtBaseY
+    scene.add(bottomMesh)
 
     const contourMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uMaxHeight: { value: elevationScale },
         uDensity: { value: quality === 'high' ? 60 : quality === 'balanced' ? 48 : 36 },
-        uThickness: { value: 0.04 },
-        uOpacity: { value: 0.66 },
+        uThickness: { value: 0.038 },
+        uOpacity: { value: isDarkTheme ? 0.7 : 0.62 },
       },
       vertexShader: `
         varying float vHeight;
@@ -587,7 +697,7 @@ export default function AoiTerrain3D({
           float d = min(f, 1.0 - f);
           float aa = fwidth(vHeight * uDensity) * 0.9;
           float line = 1.0 - smoothstep(uThickness, uThickness + aa, d);
-          gl_FragColor = vec4(vec3(0.06, 0.09, 0.13), line * uOpacity);
+          gl_FragColor = vec4(vec3(0.08, 0.11, 0.16), line * uOpacity);
         }
       `,
       transparent: true,
@@ -613,8 +723,10 @@ export default function AoiTerrain3D({
         const maxAnisotropy = renderer.capabilities.getMaxAnisotropy()
         metricTexture = rendered.texture
         metricTexture.anisotropy = Math.max(2, Math.min(maxAnisotropy, 16))
-        material.map = metricTexture
-        material.needsUpdate = true
+        colorOverlayMaterial.map = metricTexture
+        colorOverlayMaterial.needsUpdate = true
+        skirtMaterial.map = metricTexture
+        skirtMaterial.needsUpdate = true
         setMetricRange(rendered.range)
       } catch {
         setMetricRange(null)
@@ -649,9 +761,9 @@ export default function AoiTerrain3D({
       ]
       const geo = new THREE.BufferGeometry().setFromPoints(points)
       const mat = new THREE.LineBasicMaterial({
-        color: options?.color ?? 0xe2e8f0,
+        color: options?.color ?? (isDarkTheme ? 0xd6e5ff : 0x1f3a52),
         transparent: true,
-        opacity: options?.opacity ?? 0.42,
+        opacity: options?.opacity ?? (isDarkTheme ? 0.76 : 0.6),
         linewidth: options?.lineWidth ?? 1,
         depthTest: false,
         depthWrite: false,
@@ -668,9 +780,9 @@ export default function AoiTerrain3D({
     for (let row = 0; row < 3; row++) {
       for (let col = 0; col < 3; col++) {
         buildCellLoop(col / 3, (col + 1) / 3, row / 3, (row + 1) / 3, {
-          color: 0x93c5fd,
-          opacity: 0.5,
-          lift: 0.2,
+          color: isDarkTheme ? 0xc1ddff : 0x275072,
+          opacity: isDarkTheme ? 0.74 : 0.62,
+          lift: 0.26,
         })
       }
     }
@@ -696,9 +808,9 @@ export default function AoiTerrain3D({
       fillGeo.setIndex([0, 1, 2, 0, 2, 3])
       fillGeo.computeVertexNormals()
       const fillMat = new THREE.MeshBasicMaterial({
-        color: 0x22d3ee,
+        color: 0x4dd8ff,
         transparent: true,
-        opacity: 0.16,
+        opacity: 0.21,
         depthTest: false,
         depthWrite: false,
         side: THREE.DoubleSide,
@@ -711,15 +823,15 @@ export default function AoiTerrain3D({
       })
 
       buildCellLoop(u0, u1, v0, v1, {
-        color: 0x67e8f9,
+        color: 0x8ff4ff,
         opacity: 1,
-        lift: 0.32,
+        lift: 0.38,
       })
 
       buildCellLoop(u0, u1, v0, v1, {
-        color: 0xfef08a,
-        opacity: 0.72,
-        lift: 0.42,
+        color: 0xfff28c,
+        opacity: 0.86,
+        lift: 0.48,
       })
 
       for (const corner of corners) {
@@ -796,11 +908,13 @@ export default function AoiTerrain3D({
       geometry.dispose()
       subtleFrame.geometry.dispose()
       ;(subtleFrame.material as THREE.Material).dispose()
-      material.map?.dispose()
-      material.dispose()
+      baseMaterial.dispose()
+      colorOverlayMaterial.dispose()
       contourMaterial.dispose()
-      slabGeo.dispose()
-      slabMat.dispose()
+      skirtMeshes.forEach((mesh) => mesh.geometry.dispose())
+      skirtMaterial.dispose()
+      bottomGeo.dispose()
+      bottomMat.dispose()
       metricTexture?.dispose()
       disposables.forEach((dispose) => dispose())
       renderer.dispose()
@@ -808,48 +922,55 @@ export default function AoiTerrain3D({
         container.removeChild(renderer.domElement)
       }
     }
-  }, [open, terrain, texturePng, metricGrid, selectedCell, layer, quality, selectedLabel])
+  }, [open, terrain, texturePng, metricGrid, selectedCell, layer, quality, selectedLabel, isDarkTheme])
 
   if (!open) return null
 
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-zinc-950/95 p-3 text-zinc-100">
+    <div className="rounded-2xl border border-border bg-card p-3 text-foreground">
       <div className="mb-2 flex items-center justify-between">
         <p className="flex items-center gap-2 text-sm font-semibold">
           <Mountain className="h-4 w-4 text-sky-300" />
           3D Terrain Viewer
         </p>
-        <p className="text-xs text-zinc-300">
+        <p className="text-xs text-muted-foreground">
           Metric: {layerLabel(layer)} | {terrain?.source || 'loading terrain'}
         </p>
       </div>
       {loading && (
-        <div className="mb-2 inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-2 py-1 text-xs text-zinc-300">
+        <div className="mb-2 inline-flex items-center gap-2 rounded-lg border border-border px-2 py-1 text-xs text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           Loading DEM for selected AOI
         </div>
       )}
       {error && (
-        <div className="mb-2 rounded-lg border border-rose-800 bg-rose-950/60 px-2 py-1 text-xs text-rose-200">
+        <div className="mb-2 rounded-lg border border-rose-700/60 bg-rose-500/10 px-2 py-1 text-xs text-rose-700 dark:text-rose-300">
           {error}
         </div>
       )}
-      <div ref={mountRef} className="h-[24rem] w-full overflow-hidden rounded-xl border border-zinc-700/70" />
-      <div className="mt-2 rounded-lg border border-zinc-700/70 bg-zinc-900/70 p-2">
-        <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-400">
+      <div
+        ref={mountRef}
+        className={`h-[24rem] w-full overflow-hidden rounded-xl border border-border/70 ${
+          isDarkTheme
+            ? 'bg-[radial-gradient(120%_100%_at_20%_0%,rgba(22,101,139,0.35)_0%,rgba(6,24,44,0.92)_52%,rgba(4,13,27,0.98)_100%)]'
+            : 'bg-[radial-gradient(120%_100%_at_15%_0%,rgba(186,230,253,0.9)_0%,rgba(224,242,254,0.76)_45%,rgba(214,226,236,0.94)_100%)]'
+        }`}
+      />
+      <div className="mt-2 rounded-lg border border-border/80 bg-muted/35 p-2">
+        <p className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
           {layerLabel(layer)} scale {metricGrid?.isSimulated ? '(simulated)' : '(measured)'}
         </p>
         <div
           className="mt-1 h-3 w-full rounded"
           style={{ backgroundImage: legendGradientCss(layer) }}
         />
-        <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-300">
+        <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
           <span>{(metricRange?.min ?? metricGrid?.min ?? 0).toFixed(3)}</span>
           <span>{layerUnits(layer, metricGrid)}</span>
           <span>{(metricRange?.max ?? metricGrid?.max ?? 1).toFixed(3)}</span>
         </div>
       </div>
-      <p className="mt-2 text-[11px] text-zinc-400">
+      <p className="mt-2 text-[11px] text-muted-foreground">
         {terrain
           ? `High-fidelity topographic surface using ${layerLabel(layer)} color mapping. Selected plot point: ${selectedLabel || 'none'}${meshMeta ? ` | mesh ${meshMeta.resolution}px${meshMeta.smoothed ? ', smoothed' : ''}` : ''}.`
           : 'Terrain will appear when providers return valid DEM coverage for this AOI.'}

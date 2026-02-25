@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { MessageCircle, Send, Loader2, AlertTriangle } from 'lucide-react'
 
-type ChatState = 'idle' | 'loading' | 'partial-data' | 'provider-outage' | 'offline'
+type ChatState = 'idle' | 'loading' | 'partial-data' | 'provider-outage' | 'offline' | 'unavailable'
 
 type AssistantDetail = {
   sections?: {
@@ -84,8 +84,36 @@ function stateLabel(state: ChatState) {
   if (state === 'loading') return 'Analyzing'
   if (state === 'partial-data') return 'Partial data'
   if (state === 'provider-outage') return 'Provider outage'
+  if (state === 'unavailable') return 'Gemini unavailable'
   if (state === 'offline') return 'Offline fallback'
   return 'Ready'
+}
+
+function sanitizeAssistantText(raw: unknown) {
+  let text = String(raw || '').trim()
+  if (!text) return ''
+
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fenced?.[1]) text = fenced[1].trim()
+
+  try {
+    const parsed = JSON.parse(text)
+    if (typeof parsed === 'string') return parsed.trim()
+    if (parsed && typeof parsed === 'object') {
+      const candidate = (parsed as any).answer || (parsed as any).response || (parsed as any).text
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+    }
+  } catch {
+    const answerMatch = text.match(/"answer"\s*:\s*"([\s\S]*?)"/i)
+    if (answerMatch?.[1]) {
+      text = answerMatch[1].replace(/\\n/g, '\n').trim()
+    }
+  }
+
+  return text
+    .replace(/^["'`{[]+/, '')
+    .replace(/["'`\]}]+$/, '')
+    .trim()
 }
 
 function renderActions(detail?: AssistantDetail) {
@@ -113,11 +141,12 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<Message[]>([])
   const [state, setState] = useState<ChatState>('idle')
-  const [assistantBackend, setAssistantBackend] = useState<'llm-gemini' | 'deterministic'>('deterministic')
-  const [llmMeta, setLlmMeta] = useState<{ model: string | null; retries: number; degraded: boolean }>({
+  const [assistantBackend, setAssistantBackend] = useState<'llm-gemini' | 'unavailable'>('unavailable')
+  const [llmMeta, setLlmMeta] = useState<{ model: string | null; retries: number; degraded: boolean; attempted: string[] }>({
     model: null,
     retries: 0,
     degraded: false,
+    attempted: [],
   })
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
@@ -174,13 +203,16 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
         return
       }
 
-      const answer = String(payload?.answer || payload?.suggestion || payload?.output || '').trim() || 'No recommendation generated.'
-      const backend = payload?.assistantBackend === 'llm-gemini' ? 'llm-gemini' : 'deterministic'
+      const answer =
+        sanitizeAssistantText(payload?.answer || payload?.suggestion || payload?.output) || 'No recommendation generated.'
+      const backend = payload?.assistantBackend === 'llm-gemini' ? 'llm-gemini' : 'unavailable'
+      const unavailable = Boolean(payload?.unavailable) || backend === 'unavailable'
       setAssistantBackend(backend)
       setLlmMeta({
         model: typeof payload?.llmFinalModel === 'string' ? payload.llmFinalModel : null,
         retries: Number(payload?.llmRetries || 0),
         degraded: Boolean(payload?.llmDegraded),
+        attempted: Array.isArray(payload?.llmAttemptedModels) ? payload.llmAttemptedModels.slice(0, 4) : [],
       })
       const detail: AssistantDetail = {
         sections: payload?.sections || undefined,
@@ -189,11 +221,12 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
         renderModel: payload?.renderModel,
       }
       const simulated = Boolean(payload?.isSimulatedInputs)
-      setState(simulated ? 'partial-data' : 'idle')
+      setState(unavailable ? 'unavailable' : simulated ? 'partial-data' : 'idle')
       setMessages((prev) => [...prev, { role: 'assistant', text: answer, detail }])
     } catch {
-      const fallback = 'Offline fallback: check irrigation uniformity, scout low-vigor zones, and re-run analysis in 24 hours.'
-      setState('offline')
+      const fallback = 'Gemini could not be reached right now. Retry in a few seconds.'
+      setAssistantBackend('unavailable')
+      setState('unavailable')
       setMessages((prev) => [...prev, { role: 'assistant', text: fallback }])
     }
   }
@@ -218,19 +251,19 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
               </div>
               <div className="flex items-center gap-1">
                 <span className="rounded-full border border-zinc-600 px-2 py-0.5 text-[11px]">
-                  {assistantBackend === 'llm-gemini' ? 'Gemini online' : 'Fallback'}
+                  {assistantBackend === 'llm-gemini' ? 'Gemini online' : 'Gemini unavailable'}
                 </span>
                 <span className="rounded-full border border-zinc-600 px-2 py-0.5 text-[11px]">
                   {stateLabel(state)}
                 </span>
               </div>
             </div>
-            {assistantBackend === 'llm-gemini' && (
-              <p className="mt-2 text-[11px] text-zinc-300">
-                {llmMeta.model ? `Model: ${llmMeta.model}` : 'Model: Gemini'} {llmMeta.retries > 0 ? `| retries ${llmMeta.retries}` : ''}
-                {llmMeta.degraded ? ' | degraded mode' : ''}
-              </p>
-            )}
+            <p className="mt-2 text-[11px] text-zinc-300">
+              {llmMeta.model ? `Model: ${llmMeta.model}` : 'Model: n/a'}
+              {llmMeta.attempted.length > 0 ? ` | attempted: ${llmMeta.attempted.join(', ')}` : ''}
+              {llmMeta.retries > 0 ? ` | retries ${llmMeta.retries}` : ''}
+              {llmMeta.degraded ? ' | degraded' : ''}
+            </p>
           </header>
 
           <div ref={scrollRef} className="max-h-80 space-y-3 overflow-auto bg-zinc-50 px-4 py-4 text-sm">
@@ -295,8 +328,8 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
                     <div className="mt-2">
                       <p className="text-xs font-semibold text-zinc-700">Suggested actions</p>
                       <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs text-zinc-600">
-                        {actions.map((action) => (
-                          <li key={action}>{action}</li>
+                        {actions.map((action, actionIndex) => (
+                          <li key={`${actionIndex}-${action}`}>{action}</li>
                         ))}
                       </ul>
                     </div>
@@ -305,8 +338,8 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
                     <div className="mt-2">
                       <p className="text-xs font-semibold text-zinc-700">Evidence</p>
                       <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs text-zinc-600">
-                        {evidence.map((item) => (
-                          <li key={item}>{item}</li>
+                        {evidence.map((item, evidenceIndex) => (
+                          <li key={`${evidenceIndex}-${item}`}>{item}</li>
                         ))}
                       </ul>
                     </div>
@@ -326,6 +359,13 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
               <div className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
                 <AlertTriangle className="h-4 w-4" />
                 Some providers are degraded. Guidance is conservative.
+              </div>
+            )}
+
+            {state === 'unavailable' && (
+              <div className="inline-flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-rose-800">
+                <AlertTriangle className="h-4 w-4" />
+                Gemini unavailable right now. Retry in a few seconds.
               </div>
             )}
           </div>

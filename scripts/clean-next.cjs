@@ -7,7 +7,7 @@ const force = args.has('--force')
 const guarded = args.has('--guarded') || !force
 
 const root = process.cwd()
-const targets = [path.join(root, '.next'), path.join(root, 'functions', '.next')]
+const targets = [path.join(root, '.next-dev'), path.join(root, '.next'), path.join(root, 'functions', '.next')]
 
 function safeExec(command) {
   try {

@@ -1,10 +1,9 @@
 import { randomUUID } from 'crypto'
 import { computeAnomalyScore } from './anomaly'
-import { composeChatResponse } from './chat'
 import { buildDataQuality, buildFeatureVector } from './feature-engineering'
 import { forecastNdvi } from './forecasting'
 import { computeZoneClusters } from './kmeans'
-import { composeLlmChatResponse } from './llm-chat'
+import { composeLlmChatResponse, GeminiUnavailableError } from './llm-chat'
 import { persistInferenceFeedback, persistModelHeartbeat, ML_ENGINE_VERSION } from './persistence'
 import { buildRecommendations, computeObjectiveRisk } from './recommendations'
 import { runWhatIfSimulation } from './simulation'
@@ -92,6 +91,13 @@ export async function runMlChat(input: MLInput) {
   const inference = await runMlInference(input)
   const prompt = String(input.prompt || '')
   let chat = null
+  let llmUnavailable: {
+    message: string
+    attemptedModels: string[]
+    retries: number
+    retryAfterMs?: number
+    lastFailure?: string
+  } | null = null
   try {
     chat = await composeLlmChatResponse({
       prompt,
@@ -102,24 +108,29 @@ export async function runMlChat(input: MLInput) {
       history: input.history,
       context: input.context,
     })
-  } catch {
+  } catch (error: any) {
     chat = null
-  }
-
-  if (!chat) {
-    chat = composeChatResponse({
-      prompt,
-      inference,
-      mode: input.mode,
-      selectedCell: input.selectedCell || input?.context?.selectedCell || null,
-      history: input.history,
-    })
-    chat.backend = 'deterministic'
+    if (error instanceof GeminiUnavailableError) {
+      llmUnavailable = {
+        message: error.message,
+        attemptedModels: error.attemptedModels,
+        retries: error.retries,
+        retryAfterMs: error.retryAfterMs,
+        lastFailure: error.lastFailure,
+      }
+    } else {
+      llmUnavailable = {
+        message: String(error?.message || 'gemini_unavailable'),
+        attemptedModels: [],
+        retries: 0,
+      }
+    }
   }
 
   return {
     inference,
     chat,
+    llmUnavailable,
   }
 }
 

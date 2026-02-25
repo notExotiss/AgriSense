@@ -27,11 +27,44 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         : [],
     })
 
+    if (!result.chat) {
+      const retryAfterMs = Number(result.llmUnavailable?.retryAfterMs || 0) || 8000
+      const answer = `Gemini is temporarily unavailable for this request. Retry in about ${Math.max(1, Math.round(retryAfterMs / 1000))}s.`
+      return res.status(200).json({
+        answer,
+        sections: {
+          rationale: 'The assistant backend did not return a usable model response.',
+          actions: ['Retry shortly.', 'Check Gemini model availability if this persists.'],
+        },
+        output: answer,
+        assistantBackend: 'unavailable',
+        unavailable: true,
+        retryAfterMs,
+        llmAttemptedModels: result.llmUnavailable?.attemptedModels || [],
+        llmFinalModel: null,
+        llmRetries: Number(result.llmUnavailable?.retries || 0),
+        llmDegraded: true,
+        engine: result.inference.engine,
+        confidence: result.inference.confidence,
+        dataQuality: result.inference.dataQuality,
+        inference: result.inference,
+        mode: body?.mode || 'status',
+        evidence: [],
+        tasks: [],
+        selectedCell: body?.selectedCell || body?.context?.selectedCell || null,
+        scenarioUsed: false,
+        confidenceBreakdown: {
+          model: result.inference.confidence,
+          dataQuality: result.inference.dataQuality?.score,
+        },
+      })
+    }
+
     return res.status(200).json({
       answer: result.chat.answer,
       sections: result.chat.sections,
       output: result.chat.text,
-      assistantBackend: result.chat.backend || 'deterministic',
+      assistantBackend: result.chat.backend || 'llm-gemini',
       engine: result.inference.engine,
       confidence: result.inference.confidence,
       dataQuality: result.inference.dataQuality,
@@ -48,19 +81,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     })
   } catch (error: any) {
     const message = String(error?.message || 'Unexpected inference error')
-    const fallback = [
-      'AI Assistant fallback mode is active.',
-      'Use current NDVI trend, anomaly score, and selected-cell stress to prioritize irrigation and scouting.',
-      'Re-run analysis after refreshing data providers.',
-    ].join(' ')
+    const answer = 'Gemini is temporarily unavailable for this request. Please retry shortly.'
     return res.status(200).json({
-      output: fallback,
-      engine: 'agrisense-ml-fallback',
-      confidence: 0.42,
+      answer,
+      output: answer,
+      assistantBackend: 'unavailable',
+      unavailable: true,
+      retryAfterMs: 8000,
+      engine: 'agrisense-ml-engine',
+      confidence: 0,
       dataQuality: {
-        completeness: 0.5,
-        providerQuality: 0.5,
-        score: 0.42,
+        completeness: 0,
+        providerQuality: 0,
+        score: 0,
         isSimulatedInputs: true,
         warnings: [message],
       },

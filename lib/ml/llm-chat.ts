@@ -17,6 +17,22 @@ const DEFAULT_FALLBACK_MODELS = ['gemini-1.5-flash', 'gemini-1.5-flash-8b']
 const REQUEST_TIMEOUT_MS = 25000
 const MAX_RETRIES_PER_MODEL = 2
 
+export class GeminiUnavailableError extends Error {
+  attemptedModels: string[]
+  retries: number
+  retryAfterMs?: number
+  lastFailure: string
+
+  constructor(message: string, details: { attemptedModels: string[]; retries: number; retryAfterMs?: number; lastFailure: string }) {
+    super(message)
+    this.name = 'GeminiUnavailableError'
+    this.attemptedModels = details.attemptedModels
+    this.retries = details.retries
+    this.retryAfterMs = details.retryAfterMs
+    this.lastFailure = details.lastFailure
+  }
+}
+
 function toMode(value?: string): MLChatResponse['mode'] {
   if (
     value === 'irrigation-plan' ||
@@ -74,6 +90,47 @@ function parseJsonFromText(text: string) {
       return null
     }
   }
+}
+
+function decodeJsonEscapes(value: string) {
+  try {
+    return JSON.parse(`"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
+  } catch {
+    return value
+  }
+}
+
+function sanitizeAnswerText(raw: unknown) {
+  let text = String(raw || '').trim()
+  if (!text) return ''
+
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fenced?.[1]) text = fenced[1].trim()
+
+  if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
+    const parsed = parseJsonFromText(text)
+    if (parsed && typeof parsed === 'object') {
+      const fromKeys = (parsed as any).answer || (parsed as any).response || (parsed as any).text
+      const nested = typeof (parsed as any).data === 'object' ? ((parsed as any).data?.answer || (parsed as any).data?.text) : ''
+      const resolved = String(fromKeys || nested || '').trim()
+      if (resolved) text = resolved
+    }
+  }
+
+  if (!text || text.startsWith('{') || text.startsWith('[')) {
+    const answerMatch = text.match(/"answer"\s*:\s*"([\s\S]*?)"/i)
+    if (answerMatch?.[1]) {
+      text = decodeJsonEscapes(answerMatch[1]).replace(/\\n/g, '\n').trim()
+    }
+  }
+
+  text = text
+    .replace(/^["'`{[]+/, '')
+    .replace(/["'`\]}]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return text
 }
 
 function sanitizeActions(raw: unknown) {
@@ -150,6 +207,7 @@ function buildSystemPrompt() {
     'Answer the user question first in plain language, then provide rationale, actions, and forecast when relevant.',
     'Use only provided context and metrics. Never invent unavailable values.',
     'If the question references missing context, say exactly what is missing and ask one concise clarifying question.',
+    'Do not return markdown code fences or raw JSON objects in the answer.',
     'Return strict JSON only with keys: answer, rationale, actions, forecast, mode.',
     'actions must be an array of 0-5 concise action strings.',
     'mode must be one of: status, irrigation-plan, stress-debug, forecast, next-actions, what-if-explainer.',
@@ -223,6 +281,7 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
   let totalRetries = 0
   let finalModel: string | null = null
   let lastFailure = 'gemini_failed'
+  let retryAfterMs: number | undefined
 
   const contents: any[] = history.map((turn) => ({
     role: turn.role,
@@ -281,6 +340,13 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
       if (!response.ok) {
         const text = await response.text().catch(() => '')
         lastFailure = `gemini_http_${response.status}:${text.slice(0, 220)}`
+        const retryAfterHeader = response.headers.get('retry-after')
+        if (retryAfterHeader) {
+          const seconds = Number(retryAfterHeader)
+          if (Number.isFinite(seconds) && seconds > 0) {
+            retryAfterMs = Math.max(retryAfterMs || 0, Math.round(seconds * 1000))
+          }
+        }
         if (shouldRetryStatus(response.status) && attempt < MAX_RETRIES_PER_MODEL) {
           totalRetries += 1
           await new Promise((resolve) => setTimeout(resolve, 420 * (attempt + 1)))
@@ -302,7 +368,7 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
       }
 
       const parsed = parseJsonFromText(rawText)
-      const answer = String((parsed as any)?.answer || rawText).trim()
+      const answer = sanitizeAnswerText((parsed as any)?.answer || rawText)
       if (!answer) {
         lastFailure = 'gemini_missing_answer'
         if (attempt < MAX_RETRIES_PER_MODEL) {
@@ -344,6 +410,10 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
     }
   }
 
-  throw new Error(`gemini_all_models_failed:${lastFailure}`)
+  throw new GeminiUnavailableError('gemini_all_models_failed', {
+    attemptedModels,
+    retries: totalRetries,
+    retryAfterMs,
+    lastFailure,
+  })
 }
-

@@ -4,7 +4,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { Loader2, TriangleAlert } from 'lucide-react'
+import { TriangleAlert } from 'lucide-react'
+import { TOPO_PALETTES, sampleTopographyPalette } from '../../lib/visual/topography'
 
 type HeroLegendStop = {
   value: number
@@ -37,25 +38,6 @@ type HeroMapPayload = {
   }
 }
 
-type HeroApiResponse = {
-  success: boolean
-  cacheHit: boolean
-  data?: HeroMapPayload
-  warnings?: string[]
-  message?: string
-}
-
-type HeroTerrainApiResponse = {
-  success?: boolean
-  degraded?: boolean
-  data?: {
-    demGrid?: number[]
-    width?: number
-    height?: number
-    source?: string
-  }
-}
-
 type HoverState = {
   ndvi: number
   x: number
@@ -76,12 +58,160 @@ type HeroTerrainSequenceProps = {
   onIntroComplete?: () => void
 }
 
+const INTRO_HOLD_MS = 400
+const INTRO_REVEAL_MS = 1700
+const INTRO_DOCK_MS = 1300
+
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
 }
 
 function mix(start: number, end: number, t: number) {
   return start + (end - start) * t
+}
+
+function encodeFloatGridBase64(values: Float32Array) {
+  const bytes = new Uint8Array(values.buffer)
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    const slice = bytes.subarray(i, i + chunk)
+    for (let j = 0; j < slice.length; j++) {
+      binary += String.fromCharCode(slice[j])
+    }
+  }
+  return window.btoa(binary)
+}
+
+function canvasToBase64Png(canvas: HTMLCanvasElement) {
+  return canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, '')
+}
+
+function createInstantHeroPayload(): HeroMapPayload {
+  const width = 224
+  const height = 156
+  const values = new Float32Array(width * height)
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+
+  for (let y = 0; y < height; y++) {
+    const v = y / Math.max(1, height - 1)
+    for (let x = 0; x < width; x++) {
+      const u = x / Math.max(1, width - 1)
+      const ridges =
+        Math.sin((u * 4.8 + v * 1.9) * Math.PI) * 0.24 +
+        Math.cos((v * 3.1 - u * 0.8) * Math.PI) * 0.18 +
+        Math.sin(u * 9.2 * Math.PI) * Math.cos(v * 7.4 * Math.PI) * 0.12
+      const mound = Math.exp(-((u - 0.62) * (u - 0.62) * 9 + (v - 0.42) * (v - 0.42) * 14)) * 0.34
+      const valley = Math.exp(-((u - 0.28) * (u - 0.28) * 16 + (v - 0.66) * (v - 0.66) * 11)) * -0.22
+      const value = clamp(0.34 + ridges + mound + valley, -0.22, 0.76)
+      values[y * width + x] = value
+      if (value < min) min = value
+      if (value > max) max = value
+    }
+  }
+
+  const range = Math.max(1e-6, max - min)
+  const normalized = new Float32Array(values.length)
+  for (let i = 0; i < values.length; i++) {
+    normalized[i] = clamp((values[i] - min) / range, 0, 1)
+  }
+
+  const get = (x: number, y: number) => {
+    const sx = clamp(x, 0, width - 1)
+    const sy = clamp(y, 0, height - 1)
+    return normalized[sy * width + sx]
+  }
+
+  const outlineCanvas = document.createElement('canvas')
+  outlineCanvas.width = width
+  outlineCanvas.height = height
+  const outlineCtx = outlineCanvas.getContext('2d')
+  if (!outlineCtx) throw new Error('instant_outline_context_failed')
+  const outlineImg = outlineCtx.createImageData(width, height)
+  const outlinePx = outlineImg.data
+
+  const topoCanvas = document.createElement('canvas')
+  topoCanvas.width = width
+  topoCanvas.height = height
+  const topoCtx = topoCanvas.getContext('2d')
+  if (!topoCtx) throw new Error('instant_topo_context_failed')
+  const topoImg = topoCtx.createImageData(width, height)
+  const topoPx = topoImg.data
+
+  const contourLevels = 21
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x
+      const out = idx * 4
+      const value = normalized[idx]
+      const sx = get(x + 1, y) - get(x - 1, y)
+      const sy = get(x, y + 1) - get(x, y - 1)
+      const shade = clamp(0.82 - sx * 0.46 - sy * 0.38, 0.34, 1.14)
+      const contourDistance = Math.abs(value * contourLevels - Math.round(value * contourLevels))
+      const contour = contourDistance < 0.03
+
+      const gray = Math.round(clamp(145 * shade + 34, 0, 255))
+      if (contour) {
+        const alpha = contourDistance < 0.012 ? 0.6 : 0.36
+        outlinePx[out] = Math.round(gray * (1 - alpha * 0.4))
+        outlinePx[out + 1] = Math.round(gray * (1 - alpha * 0.26))
+        outlinePx[out + 2] = Math.round(gray * (1 - alpha * 0.12) + 90 * alpha)
+      } else {
+        outlinePx[out] = gray
+        outlinePx[out + 1] = gray
+        outlinePx[out + 2] = gray
+      }
+      outlinePx[out + 3] = 255
+
+      const [rBase, gBase, bBase] = sampleTopographyPalette('ndvi', value)
+      let r = Math.round(clamp(rBase * shade, 0, 255))
+      let g = Math.round(clamp(gBase * shade, 0, 255))
+      let b = Math.round(clamp(bBase * shade, 0, 255))
+      if (contour) {
+        const alpha = contourDistance < 0.012 ? 0.55 : 0.32
+        r = Math.round((1 - alpha) * r + alpha * 10)
+        g = Math.round((1 - alpha) * g + alpha * 22)
+        b = Math.round((1 - alpha) * b + alpha * 46)
+      }
+      topoPx[out] = r
+      topoPx[out + 1] = g
+      topoPx[out + 2] = b
+      topoPx[out + 3] = 255
+    }
+  }
+
+  outlineCtx.putImageData(outlineImg, 0, 0)
+  topoCtx.putImageData(topoImg, 0, 0)
+
+  return {
+    outlinePng: canvasToBase64Png(outlineCanvas),
+    topoPng: canvasToBase64Png(topoCanvas),
+    legend: {
+      metric: 'ndvi',
+      min,
+      max,
+      unit: 'NDVI',
+      stops: TOPO_PALETTES.ndvi.map((stop) => ({
+        value: min + (max - min) * stop.stop,
+        color: stop.color,
+      })),
+    },
+    bbox: [-74.49, 40.45, -74.33, 40.59],
+    source: 'agrisense-instant-premade',
+    generatedAt: new Date().toISOString(),
+    metricGrid: {
+      encoded: encodeFloatGridBase64(values),
+      width,
+      height,
+    },
+    imagery: {
+      id: 'instant-premade',
+      date: null,
+      cloudCover: null,
+      platform: 'local',
+    },
+  }
 }
 
 function observeRange(values: ArrayLike<number>) {
@@ -163,6 +293,128 @@ function resampleGrid(values: ArrayLike<number>, width: number, height: number, 
   return out
 }
 
+function stageRect() {
+  const stageAspect = 16 / 10
+  const maxWidth = Math.min(window.innerWidth * 0.84, 1120)
+  const maxHeight = Math.min(window.innerHeight * 0.78, 700)
+  let width = maxWidth
+  let height = width / stageAspect
+  if (height > maxHeight) {
+    height = maxHeight
+    width = height * stageAspect
+  }
+  return {
+    left: Math.round((window.innerWidth - width) / 2),
+    top: Math.round((window.innerHeight - height) / 2),
+    width: Math.round(width),
+    height: Math.round(height),
+  }
+}
+
+function createSceneBackdropTexture(darkTheme: boolean) {
+  const canvas = document.createElement('canvas')
+  canvas.width = 640
+  canvas.height = 640
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+
+  const base = ctx.createLinearGradient(0, 0, 0, canvas.height)
+  if (darkTheme) {
+    base.addColorStop(0, '#0b223f')
+    base.addColorStop(0.58, '#071933')
+    base.addColorStop(1, '#041126')
+  } else {
+    base.addColorStop(0, '#d7e9fb')
+    base.addColorStop(0.58, '#e7f1fa')
+    base.addColorStop(1, '#d4e2ef')
+  }
+  ctx.fillStyle = base
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+  const glow = ctx.createRadialGradient(
+    canvas.width * 0.22,
+    canvas.height * 0.12,
+    20,
+    canvas.width * 0.22,
+    canvas.height * 0.12,
+    canvas.width * 0.82
+  )
+  if (darkTheme) {
+    glow.addColorStop(0, 'rgba(56,189,248,0.20)')
+    glow.addColorStop(1, 'rgba(56,189,248,0)')
+  } else {
+    glow.addColorStop(0, 'rgba(59,130,246,0.16)')
+    glow.addColorStop(1, 'rgba(59,130,246,0)')
+  }
+  ctx.fillStyle = glow
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.wrapS = THREE.ClampToEdgeWrapping
+  texture.wrapT = THREE.ClampToEdgeWrapping
+  return texture
+}
+
+function createEdgeSkirtGeometry(
+  edge: 'north' | 'south' | 'east' | 'west',
+  segments: number,
+  sampleHeightFn: (u: number, v: number) => number,
+  planeWidth: number,
+  planeHeight: number,
+  baseY: number
+) {
+  const vertices: number[] = []
+  const uvs: number[] = []
+  const indices: number[] = []
+  const outset = 2.8
+
+  for (let i = 0; i <= segments; i++) {
+    const t = i / Math.max(1, segments)
+    let u = t
+    let v = t
+    if (edge === 'north') {
+      u = t
+      v = 0
+    } else if (edge === 'south') {
+      u = t
+      v = 1
+    } else if (edge === 'west') {
+      u = 0
+      v = t
+    } else {
+      u = 1
+      v = t
+    }
+    const x = -planeWidth / 2 + u * planeWidth
+    const z = -planeHeight / 2 + v * planeHeight
+    const y = sampleHeightFn(u, v)
+    let bottomX = x
+    let bottomZ = z
+    if (edge === 'north') bottomZ -= outset
+    if (edge === 'south') bottomZ += outset
+    if (edge === 'west') bottomX -= outset
+    if (edge === 'east') bottomX += outset
+    vertices.push(x, y, z)
+    vertices.push(bottomX, baseY, bottomZ)
+    uvs.push(u, v)
+    uvs.push(u, v)
+  }
+
+  for (let i = 0; i < segments; i++) {
+    const s = i * 2
+    indices.push(s, s + 1, s + 2)
+    indices.push(s + 1, s + 3, s + 2)
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  geometry.setIndex(indices)
+  geometry.computeVertexNormals()
+  return geometry
+}
+
 async function loadTextureFromBase64(renderer: THREE.WebGLRenderer, base64: string) {
   const image = await new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image()
@@ -187,27 +439,33 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
   const cinematicRef = useRef<HTMLDivElement | null>(null)
   const introCompletedRef = useRef(false)
   const sceneBootstrappedRef = useRef(false)
+  const callbackFiredRef = useRef(false)
+  const onIntroCompleteRef = useRef(onIntroComplete)
+  const initialModeRef = useRef<IntroMode>(introMode)
+  const introEnabled = initialModeRef.current === 'run'
   const [portalHost, setPortalHost] = useState<HTMLElement | null>(null)
   const [data, setData] = useState<HeroMapPayload | null>(null)
   const [heightGrid, setHeightGrid] = useState<HeightGridState | null>(null)
   const [heightGridReady, setHeightGridReady] = useState(false)
-  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [hover, setHover] = useState<HoverState | null>(null)
-  const [phaseLabel, setPhaseLabel] = useState<'initializing' | 'revealing' | 'docking' | 'interactive'>('initializing')
-  const [cinematicActive, setCinematicActive] = useState(introMode === 'run')
+  const [phaseLabel, setPhaseLabel] = useState<'initializing' | 'revealing' | 'docking' | 'interactive'>(
+    introEnabled ? 'initializing' : 'interactive'
+  )
+  const [cinematicActive, setCinematicActive] = useState(introEnabled)
   const phaseRef = useRef<'initializing' | 'revealing' | 'docking' | 'interactive'>('initializing')
 
   const legendStops = useMemo(() => data?.legend?.stops || [], [data?.legend?.stops])
 
   useEffect(() => {
-    setCinematicActive(introMode === 'run')
-    if (introMode === 'skip') {
-      introCompletedRef.current = true
-      setPhaseLabel('interactive')
-      phaseRef.current = 'interactive'
-    }
-  }, [introMode])
+    onIntroCompleteRef.current = onIntroComplete
+  }, [onIntroComplete])
+
+  const emitIntroComplete = () => {
+    if (callbackFiredRef.current) return
+    callbackFiredRef.current = true
+    onIntroCompleteRef.current?.()
+  }
 
   useEffect(() => {
     if (typeof document === 'undefined') return
@@ -221,84 +479,50 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
   }, [])
 
   useEffect(() => {
-    phaseRef.current = 'initializing'
-    setPhaseLabel('initializing')
-    if (introMode === 'run') {
-      setCinematicActive(true)
-      introCompletedRef.current = false
+    if (!introEnabled) {
+      introCompletedRef.current = true
+      phaseRef.current = 'interactive'
+      setPhaseLabel('interactive')
+      setCinematicActive(false)
     }
-  }, [data?.generatedAt, introMode])
+  }, [introEnabled])
 
   useEffect(() => {
     let active = true
-    setLoading(true)
     setError(null)
     setHeightGridReady(false)
 
-    void (async () => {
-      try {
-        const response = await fetch('/api/home/hero-map')
-        const payload = (await response.json().catch(() => ({}))) as HeroApiResponse
-        if (!response.ok || !payload?.success || !payload?.data) {
-          throw new Error(payload?.message || 'hero_map_unavailable')
-        }
-        if (!active) return
-
-        let heroHeightGrid: HeightGridState | null = null
-        try {
-          const terrainResponse = await fetch('/api/terrain/fetch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              bbox: payload.data.bbox,
-              resolution: 128,
-              layer: 'ndvi',
-              quality: 'high',
-            }),
-          })
-          const terrainPayload = (await terrainResponse.json().catch(() => ({}))) as HeroTerrainApiResponse
-          if (
-            terrainResponse.ok &&
-            terrainPayload?.success &&
-            !terrainPayload?.degraded &&
-            Array.isArray(terrainPayload?.data?.demGrid) &&
-            Number(terrainPayload?.data?.width) > 1 &&
-            Number(terrainPayload?.data?.height) > 1
-          ) {
-            const expected = Number(terrainPayload.data?.width) * Number(terrainPayload.data?.height)
-            const values = new Float32Array(expected)
-            for (let i = 0; i < expected; i++) {
-              const value = Number(terrainPayload.data?.demGrid?.[i])
-              values[i] = Number.isFinite(value) ? value : 0
-            }
-            heroHeightGrid = {
-              values,
-              width: Number(terrainPayload.data?.width),
-              height: Number(terrainPayload.data?.height),
-              source: String(terrainPayload.data?.source || 'terrain'),
-            }
-          }
-        } catch {
-          heroHeightGrid = null
-        }
-
-        if (!active) return
-        setHeightGrid(heroHeightGrid)
-        setHeightGridReady(true)
-        setData(payload.data)
-      } catch (err: any) {
-        if (!active) return
-        setError(String(err?.message || 'hero_map_unavailable'))
-        setHeightGridReady(true)
-      } finally {
-        if (active) setLoading(false)
+    try {
+      const payload = createInstantHeroPayload()
+      const premadeHeightGrid = smoothGrid(
+        decodeGrid(payload.metricGrid.encoded, payload.metricGrid.width, payload.metricGrid.height),
+        payload.metricGrid.width,
+        payload.metricGrid.height,
+        2
+      )
+      if (!active) return
+      setData(payload)
+      setHeightGrid({
+        values: premadeHeightGrid,
+        width: payload.metricGrid.width,
+        height: payload.metricGrid.height,
+        source: payload.source,
+      })
+      setHeightGridReady(true)
+    } catch (err: any) {
+      if (!active) return
+      setError(String(err?.message || 'hero_map_unavailable'))
+      setHeightGridReady(true)
+      if (introEnabled) {
+        setCinematicActive(false)
+        emitIntroComplete()
       }
-    })()
+    }
 
     return () => {
       active = false
     }
-  }, [])
+  }, [introEnabled])
 
   useEffect(() => {
     if (!containerRef.current || !data || !heightGridReady) return
@@ -309,20 +533,29 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
     const container = containerRef.current
     const overlay = overlayRef.current
     const cinematicShell = cinematicRef.current
+    const cinematicRunning = Boolean(cinematicShell && cinematicActive && introEnabled)
 
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color(0xdfe4e8)
+    const darkTheme = document.documentElement.classList.contains('dark')
+    const backdropTexture = createSceneBackdropTexture(darkTheme)
+    if (backdropTexture) {
+      scene.background = backdropTexture
+    }
 
     const widthPx = container.clientWidth || 900
     const heightPx = container.clientHeight || 520
-    const camera = new THREE.PerspectiveCamera(37, widthPx / heightPx, 0.1, 2200)
-    camera.position.set(-24, 88, 150)
+    const camera = new THREE.PerspectiveCamera(36, widthPx / heightPx, 0.1, 2200)
+    camera.position.set(-18, 92, 168)
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.toneMapping = THREE.ACESFilmicToneMapping
     renderer.toneMappingExposure = 1.0
+    renderer.setClearColor(0x000000, 0)
+    renderer.domElement.style.display = 'block'
+    renderer.domElement.style.width = '100%'
+    renderer.domElement.style.height = '100%'
 
     const applyRenderSize = (width: number, height: number) => {
       const safeW = Math.max(1, Math.floor(width))
@@ -332,19 +565,18 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
       camera.updateProjectionMatrix()
     }
 
-    if (cinematicShell && cinematicActive) {
+    if (cinematicRunning && cinematicShell) {
       cinematicShell.innerHTML = ''
-      const introWidth = Math.min(window.innerWidth * 0.74, 980)
-      const introHeight = Math.min(window.innerHeight * 0.62, 620)
-      cinematicShell.style.left = `${Math.round((window.innerWidth - introWidth) / 2)}px`
-      cinematicShell.style.top = `${Math.round((window.innerHeight - introHeight) / 2)}px`
-      cinematicShell.style.width = `${Math.round(introWidth)}px`
-      cinematicShell.style.height = `${Math.round(introHeight)}px`
+      const intro = stageRect()
+      cinematicShell.style.left = `${intro.left}px`
+      cinematicShell.style.top = `${intro.top}px`
+      cinematicShell.style.width = `${Math.round(intro.width)}px`
+      cinematicShell.style.height = `${Math.round(intro.height)}px`
       cinematicShell.style.borderRadius = '28px'
       cinematicShell.style.opacity = '1'
-      cinematicShell.style.boxShadow = '0 28px 90px rgba(0,0,0,0.12)'
+      cinematicShell.style.boxShadow = '0 24px 78px rgba(2,8,23,0.22)'
       cinematicShell.appendChild(renderer.domElement)
-      applyRenderSize(introWidth, introHeight)
+      applyRenderSize(intro.width, intro.height)
     } else {
       container.innerHTML = ''
       container.appendChild(renderer.domElement)
@@ -367,7 +599,7 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
     )
 
     const sourceValues = heightGrid
-      ? smoothGrid(heightGrid.values, heightGrid.width, heightGrid.height, 1)
+      ? smoothGrid(heightGrid.values, heightGrid.width, heightGrid.height, 2)
       : ndviGrid
     const sourceWidth = heightGrid ? heightGrid.width : data.metricGrid.width
     const sourceHeight = heightGrid ? heightGrid.height : data.metricGrid.height
@@ -395,12 +627,31 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
     const planeHeight = planeWidth * aspect
     const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, sampleWidth - 1, sampleHeight - 1)
     const positions = geometry.attributes.position as THREE.BufferAttribute
-    const elevationScale = heightGrid ? 62 : 40
+    const elevationScale = heightGrid ? 68 : 44
+    const baseY = -1.8
     for (let i = 0; i < normalizedHeight.length; i++) {
       positions.setZ(i, normalizedHeight[i] * elevationScale)
     }
     positions.needsUpdate = true
     geometry.computeVertexNormals()
+
+    const sampleHeightOnMesh = (u: number, v: number) => {
+      const x = clamp(u, 0, 1) * (sampleWidth - 1)
+      const y = clamp(v, 0, 1) * (sampleHeight - 1)
+      const x0 = Math.floor(x)
+      const y0 = Math.floor(y)
+      const x1 = Math.min(sampleWidth - 1, x0 + 1)
+      const y1 = Math.min(sampleHeight - 1, y0 + 1)
+      const tx = x - x0
+      const ty = y - y0
+      const idx00 = y0 * sampleWidth + x0
+      const idx10 = y0 * sampleWidth + x1
+      const idx01 = y1 * sampleWidth + x0
+      const idx11 = y1 * sampleWidth + x1
+      const top = mix(normalizedHeight[idx00], normalizedHeight[idx10], tx)
+      const bottom = mix(normalizedHeight[idx01], normalizedHeight[idx11], tx)
+      return mix(top, bottom, ty) * elevationScale
+    }
 
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enabled = false
@@ -409,19 +660,32 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
     controls.maxPolarAngle = Math.PI / 2.06
     controls.minDistance = 56
     controls.maxDistance = 260
-    controls.target.set(0, 18, 0)
+    controls.target.set(0, 16, 0)
+
+    const cameraTrack = {
+      introPos: new THREE.Vector3(-18, 92, 168),
+      finalPos: new THREE.Vector3(7, 114, 196),
+      introTarget: new THREE.Vector3(0, 12, 0),
+      finalTarget: new THREE.Vector3(0, 8, 0),
+      introScale: 1.36,
+      finalScale: 1,
+      introOffsetY: 0.55,
+      finalOffsetY: -0.8,
+    }
 
     let outlineTexture: THREE.Texture | null = null
     let topoTexture: THREE.Texture | null = null
     let active = true
     let animationId = 0
-    const disposables: Array<() => void> = []
     let lineMaterial: THREE.LineBasicMaterial | null = null
     let edgeMaterial: THREE.ShaderMaterial | null = null
     let contourMaterial: THREE.ShaderMaterial | null = null
+    let cutawayMaterial: THREE.ShaderMaterial | null = null
     let baseMaterial: THREE.MeshStandardMaterial | null = null
+    const skirtMeshes: THREE.Mesh[] = []
+    let bottomMesh: THREE.Mesh | null = null
     const terrainGroup = new THREE.Group()
-    terrainGroup.rotation.x = -0.06
+    terrainGroup.rotation.x = -0.055
     scene.add(terrainGroup)
 
     let dockedToPanel = !cinematicShell
@@ -557,9 +821,69 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
         line.position.y = 0.1
         terrainGroup.add(line)
 
-        const holdMs = 460
-        const revealMs = 1800
-        const dockMs = 1500
+        cutawayMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            uOutlineTex: { value: outlineTexture },
+            uTopoTex: { value: topoTexture },
+            uReveal: { value: 0.001 },
+            uShade: { value: 0.88 },
+          },
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: `
+            uniform sampler2D uOutlineTex;
+            uniform sampler2D uTopoTex;
+            uniform float uReveal;
+            uniform float uShade;
+            varying vec2 vUv;
+            void main() {
+              float blend = smoothstep(uReveal - 0.02, uReveal + 0.02, vUv.x);
+              vec3 outlineCol = texture2D(uOutlineTex, vUv).rgb;
+              vec3 topoCol = texture2D(uTopoTex, vUv).rgb;
+              vec3 color = mix(outlineCol, topoCol, blend) * uShade;
+              gl_FragColor = vec4(color, 1.0);
+            }
+          `,
+          side: THREE.DoubleSide,
+        })
+        for (const edge of ['north', 'south', 'west', 'east'] as const) {
+          const segments = edge === 'north' || edge === 'south' ? sampleWidth - 1 : sampleHeight - 1
+          const skirtGeometry = createEdgeSkirtGeometry(edge, segments, sampleHeightOnMesh, planeWidth, planeHeight, baseY)
+          const skirt = new THREE.Mesh(skirtGeometry, cutawayMaterial)
+          terrainGroup.add(skirt)
+          skirtMeshes.push(skirt)
+        }
+
+        const bottomGeo = new THREE.PlaneGeometry(planeWidth, planeHeight)
+        bottomMesh = new THREE.Mesh(bottomGeo, cutawayMaterial)
+        bottomMesh.rotation.x = -Math.PI / 2
+        bottomMesh.position.y = baseY
+        terrainGroup.add(bottomMesh)
+
+        const bounds = new THREE.Box3().setFromObject(terrainGroup)
+        const center = bounds.getCenter(new THREE.Vector3())
+        const size = bounds.getSize(new THREE.Vector3())
+        const radius = Math.max(24, Math.max(size.x, size.y, size.z) * 0.55)
+
+        cameraTrack.introTarget.copy(center).add(new THREE.Vector3(0, size.y * 0.08, 0))
+        cameraTrack.finalTarget.copy(center).add(new THREE.Vector3(0, size.y * 0.05, 0))
+        cameraTrack.introPos.copy(cameraTrack.introTarget).add(new THREE.Vector3(-radius * 0.34, radius * 1.04, radius * 1.52))
+        cameraTrack.finalPos.copy(cameraTrack.finalTarget).add(new THREE.Vector3(radius * 0.18, radius * 1.14, radius * 1.7))
+        cameraTrack.introScale = 1.24
+        cameraTrack.finalScale = 1
+        cameraTrack.introOffsetY = 0.22
+        cameraTrack.finalOffsetY = 0
+
+        controls.minDistance = Math.max(42, radius * 0.82)
+        controls.maxDistance = Math.max(220, radius * 3.9)
+        controls.target.copy(cameraTrack.introTarget)
+        camera.position.copy(cameraTrack.introPos)
+
         const start = performance.now()
 
         const setPhase = (phase: 'initializing' | 'revealing' | 'docking' | 'interactive') => {
@@ -571,18 +895,27 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
         const animate = (now: number) => {
           if (!active) return
           const elapsed = now - start
-          let reveal = 0.001
-          let dockProgress = 0
+          let reveal = 1
+          let dockProgress = 1
 
-          if (elapsed <= holdMs) {
-            setPhase('initializing')
-          } else if (elapsed <= holdMs + revealMs) {
-            setPhase('revealing')
-            reveal = clamp((elapsed - holdMs) / revealMs, 0, 1)
-          } else if (elapsed <= holdMs + revealMs + dockMs) {
-            setPhase('docking')
-            reveal = 1
-            dockProgress = clamp((elapsed - holdMs - revealMs) / dockMs, 0, 1)
+          if (cinematicRunning) {
+            reveal = 0.001
+            dockProgress = 0
+            if (elapsed <= INTRO_HOLD_MS) {
+              setPhase('initializing')
+            } else if (elapsed <= INTRO_HOLD_MS + INTRO_REVEAL_MS) {
+              setPhase('revealing')
+              reveal = clamp((elapsed - INTRO_HOLD_MS) / INTRO_REVEAL_MS, 0, 1)
+            } else if (elapsed <= INTRO_HOLD_MS + INTRO_REVEAL_MS + INTRO_DOCK_MS) {
+              setPhase('docking')
+              reveal = 1
+              dockProgress = clamp((elapsed - INTRO_HOLD_MS - INTRO_REVEAL_MS) / INTRO_DOCK_MS, 0, 1)
+            } else {
+              setPhase('interactive')
+              reveal = 1
+              dockProgress = 1
+              controls.enabled = true
+            }
           } else {
             setPhase('interactive')
             reveal = 1
@@ -591,38 +924,40 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
           }
 
           if (edgeMaterial) edgeMaterial.uniforms.uReveal.value = reveal
+          if (cutawayMaterial) cutawayMaterial.uniforms.uReveal.value = reveal
 
           const easeDock = 1 - Math.pow(1 - dockProgress, 3)
           camera.position.set(
-            mix(-24, 8, easeDock),
-            mix(88, 116, easeDock),
-            mix(150, 206, easeDock)
+            mix(cameraTrack.introPos.x, cameraTrack.finalPos.x, easeDock),
+            mix(cameraTrack.introPos.y, cameraTrack.finalPos.y, easeDock),
+            mix(cameraTrack.introPos.z, cameraTrack.finalPos.z, easeDock)
           )
-          controls.target.set(0, mix(18, 8, easeDock), 0)
-          terrainGroup.scale.setScalar(mix(2.3, 1, easeDock))
-          terrainGroup.position.y = mix(2.6, -1.2, easeDock)
-          terrainGroup.rotation.y = now * 0.00007 + mix(0.22, 0, easeDock)
+          controls.target.set(
+            mix(cameraTrack.introTarget.x, cameraTrack.finalTarget.x, easeDock),
+            mix(cameraTrack.introTarget.y, cameraTrack.finalTarget.y, easeDock),
+            mix(cameraTrack.introTarget.z, cameraTrack.finalTarget.z, easeDock)
+          )
+          terrainGroup.scale.setScalar(mix(cameraTrack.introScale, cameraTrack.finalScale, easeDock))
+          terrainGroup.position.y = mix(cameraTrack.introOffsetY, cameraTrack.finalOffsetY, easeDock)
+          terrainGroup.rotation.y = now * mix(0.00008, 0.000045, easeDock) + mix(0.22, 0, easeDock)
 
-          if (cinematicShell && cinematicActive && !dockedToPanel) {
+          if (cinematicShell && cinematicRunning && !dockedToPanel) {
             const targetRect = container.getBoundingClientRect()
-            const introWidth = Math.min(window.innerWidth * 0.74, 980)
-            const introHeight = Math.min(window.innerHeight * 0.62, 620)
-            const introLeft = Math.round((window.innerWidth - introWidth) / 2)
-            const introTop = Math.round((window.innerHeight - introHeight) / 2)
-            const left = mix(introLeft, targetRect.left, easeDock)
-            const top = mix(introTop, targetRect.top, easeDock)
-            const width = mix(introWidth, targetRect.width, easeDock)
-            const height = mix(introHeight, targetRect.height, easeDock)
+            const intro = stageRect()
+            const left = mix(intro.left, targetRect.left, easeDock)
+            const top = mix(intro.top, targetRect.top, easeDock)
+            const width = mix(intro.width, targetRect.width, easeDock)
+            const height = mix(intro.height, targetRect.height, easeDock)
             cinematicShell.style.left = `${left}px`
             cinematicShell.style.top = `${top}px`
             cinematicShell.style.width = `${width}px`
             cinematicShell.style.height = `${height}px`
-            cinematicShell.style.borderRadius = `${Math.round(mix(0, 22, easeDock))}px`
-            cinematicShell.style.boxShadow = `0 ${Math.round(mix(0, 28, easeDock))}px ${Math.round(mix(0, 70, easeDock))}px rgba(0,0,0,${mix(0, 0.24, easeDock).toFixed(3)})`
+            cinematicShell.style.borderRadius = `${Math.round(mix(28, 20, easeDock))}px`
+            cinematicShell.style.boxShadow = `0 ${Math.round(mix(24, 18, easeDock))}px ${Math.round(mix(78, 56, easeDock))}px rgba(2,8,23,${mix(0.22, 0.18, easeDock).toFixed(3)})`
             applyRenderSize(width, height)
           }
 
-          if (phaseRef.current === 'interactive' && cinematicShell && cinematicActive && !dockedToPanel) {
+          if (phaseRef.current === 'interactive' && cinematicShell && cinematicRunning && !dockedToPanel) {
             dockedToPanel = true
             container.innerHTML = ''
             container.appendChild(renderer.domElement)
@@ -633,10 +968,8 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
               if (overlay) {
                 overlay.style.opacity = '0'
               }
-              if (!introCompletedRef.current) {
-                introCompletedRef.current = true
-                onIntroComplete?.()
-              }
+              if (!introCompletedRef.current) introCompletedRef.current = true
+              emitIntroComplete()
             }
           }
 
@@ -652,9 +985,13 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
     })()
 
     const onResize = () => {
-      if (cinematicShell && cinematicActive && !dockedToPanel) {
-        const rect = cinematicShell.getBoundingClientRect()
-        applyRenderSize(rect.width, rect.height)
+      if (cinematicShell && cinematicRunning && !dockedToPanel) {
+        const intro = stageRect()
+        cinematicShell.style.left = `${intro.left}px`
+        cinematicShell.style.top = `${intro.top}px`
+        cinematicShell.style.width = `${intro.width}px`
+        cinematicShell.style.height = `${intro.height}px`
+        applyRenderSize(intro.width, intro.height)
       } else {
         applyRenderSize(container.clientWidth || 900, container.clientHeight || 520)
       }
@@ -675,26 +1012,22 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
       lineMaterial?.dispose()
       outlineTexture?.dispose()
       topoTexture?.dispose()
+      skirtMeshes.forEach((mesh) => {
+        mesh.geometry.dispose()
+      })
+      if (bottomMesh) {
+        bottomMesh.geometry.dispose()
+      }
+      cutawayMaterial?.dispose()
+      backdropTexture?.dispose()
       renderer.dispose()
-      disposables.forEach((dispose) => dispose())
       if (renderer.domElement.parentNode === container) container.removeChild(renderer.domElement)
       if (cinematicShell && renderer.domElement.parentNode === cinematicShell) cinematicShell.removeChild(renderer.domElement)
       sceneBootstrappedRef.current = false
     }
-  }, [data, heightGrid, heightGridReady, portalHost, cinematicActive, onIntroComplete])
+  }, [data, heightGrid, heightGridReady, portalHost, introEnabled])
 
-  if (loading) {
-    return (
-      <div className="flex h-[26rem] items-center justify-center rounded-2xl border border-border bg-card/70">
-        <div className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Loading NDVI terrain sequence
-        </div>
-      </div>
-    )
-  }
-
-  if (error || !data) {
+  if (error) {
     return (
       <div className="flex h-[26rem] items-center justify-center rounded-2xl border border-amber-300 bg-amber-50/70 px-4 text-center dark:border-amber-700 dark:bg-amber-950/30">
         <div className="space-y-2">
@@ -712,18 +1045,25 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
     <div className="relative">
       {cinematicActive && portalHost && createPortal(
         <div
+          ref={overlayRef}
+          className="pointer-events-none fixed inset-0 z-[80] bg-[hsl(var(--background))] transition-opacity duration-300"
+        />,
+        portalHost
+      )}
+      {cinematicActive && portalHost && createPortal(
+        <div
           ref={cinematicRef}
-          className="pointer-events-none fixed inset-0 z-[80] overflow-hidden bg-[#dfe4e8]"
+          className="pointer-events-none fixed z-[81] overflow-hidden rounded-[28px] border border-border bg-[hsl(var(--background))]"
         />,
         portalHost
       )}
       <div
         ref={containerRef}
-        className={`h-[28rem] w-full overflow-hidden rounded-2xl border border-cyan-700/30 bg-[#dfe4e8] transition-opacity duration-500 ${
-          cinematicActive ? 'opacity-20' : 'opacity-100'
+        className={`h-[28rem] w-full overflow-hidden rounded-2xl border border-cyan-700/20 bg-[hsl(var(--background))] transition-opacity duration-500 ${
+          cinematicActive ? 'opacity-0' : 'opacity-100'
         }`}
       />
-      {!cinematicActive && (
+      {!cinematicActive && data && (
         <>
           <div className="absolute left-3 top-3 rounded-full border border-cyan-400/30 bg-[#081226]/80 px-3 py-1 text-[11px] uppercase tracking-[0.12em] text-cyan-100">
             {phaseLabel === 'interactive' ? 'Interactive' : phaseLabel}
@@ -744,26 +1084,28 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
           NDVI {hover.ndvi.toFixed(3)}
         </div>
       )}
-      <div className="mt-3 rounded-xl border border-border bg-card/70 p-3">
-        <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-          <span>NDVI Legend</span>
-          <span>{data.legend.unit}</span>
+      {data && (
+        <div className="mt-3 rounded-xl border border-border bg-card/70 p-3">
+          <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+            <span>NDVI Legend</span>
+            <span>{data.legend.unit}</span>
+          </div>
+          <div className="mt-2 h-3 w-full overflow-hidden rounded-sm border border-black/15">
+            <div
+              className="h-full w-full"
+              style={{
+                background: `linear-gradient(90deg, ${legendStops
+                  .map((stop) => `rgb(${stop.color[0]}, ${stop.color[1]}, ${stop.color[2]})`)
+                  .join(', ')})`,
+              }}
+            />
+          </div>
+          <div className="mt-1 flex items-center justify-between text-xs text-muted-foreground">
+            <span>{data.legend.min.toFixed(3)}</span>
+            <span>{data.legend.max.toFixed(3)}</span>
+          </div>
         </div>
-        <div className="mt-2 h-3 w-full overflow-hidden rounded-sm border border-black/15">
-          <div
-            className="h-full w-full"
-            style={{
-              background: `linear-gradient(90deg, ${legendStops
-                .map((stop) => `rgb(${stop.color[0]}, ${stop.color[1]}, ${stop.color[2]})`)
-                .join(', ')})`,
-            }}
-          />
-        </div>
-        <div className="mt-1 flex items-center justify-between text-xs text-muted-foreground">
-          <span>{data.legend.min.toFixed(3)}</span>
-          <span>{data.legend.max.toFixed(3)}</span>
-        </div>
-      </div>
+      )}
     </div>
   )
 }

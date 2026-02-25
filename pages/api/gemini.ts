@@ -123,13 +123,18 @@ function sanitizeRequestBody(body: any) {
   }
 }
 
+function unavailableAnswer(retryAfterMs?: number) {
+  const retryText = retryAfterMs && retryAfterMs > 0 ? ` Retry in about ${Math.max(1, Math.round(retryAfterMs / 1000))}s.` : ''
+  return `Gemini is temporarily unavailable for this request.${retryText}`
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).end()
 
   try {
     const sanitized = sanitizeRequestBody(req.body)
 
-    const { inference, chat } = await runMlChat({
+    const { inference, chat, llmUnavailable } = await runMlChat({
       prompt: sanitized.prompt || 'Provide a field operations summary.',
       analysisType: sanitized.analysisType,
       objective: sanitized.objective,
@@ -145,15 +150,62 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       history: sanitized.history,
     })
 
+    if (!chat) {
+      const retryAfterMs = Number(llmUnavailable?.retryAfterMs || 0) || undefined
+      const answer = unavailableAnswer(retryAfterMs)
+      const attemptedModels = Array.isArray(llmUnavailable?.attemptedModels) ? llmUnavailable?.attemptedModels : []
+      const llmRetries = Number(llmUnavailable?.retries || 0)
+      return res.status(200).json({
+        success: true,
+        unavailable: true,
+        retryAfterMs,
+        assistantBackend: 'unavailable',
+        warnings: [llmUnavailable?.lastFailure || llmUnavailable?.message || 'gemini_unavailable'],
+        answer,
+        sections: {
+          rationale: 'The LLM provider did not return a usable response for this request.',
+          actions: ['Retry the same question in a moment.', 'If this persists, verify GEMINI_API_KEY and model availability.'],
+        },
+        renderModel: 'qa',
+        usedHistory: false,
+        suggestion: answer,
+        output: answer,
+        model: inference.engine,
+        engine: inference.engine,
+        confidence: inference.confidence,
+        objective: inference.objective,
+        dataQuality: inference.dataQuality,
+        isSimulatedInputs: inference.isSimulatedInputs,
+        inference,
+        intent: 'general',
+        intentConfidence: 0,
+        mode: sanitized.mode || 'status',
+        evidence: [],
+        tasks: [],
+        selectedCell: sanitized.context?.selectedCell || null,
+        scenarioUsed: false,
+        llmAttemptedModels: attemptedModels,
+        llmFinalModel: null,
+        llmRetries,
+        llmDegraded: true,
+        confidenceBreakdown: {
+          model: inference.confidence,
+          dataQuality: inference.dataQuality.score,
+        },
+        timestamp: new Date().toISOString(),
+      })
+    }
+
     return res.status(200).json({
       success: true,
+      unavailable: false,
       answer: chat.answer,
       sections: chat.sections,
       renderModel: chat.renderModel,
       usedHistory: chat.usedHistory,
       suggestion: chat.text,
       output: chat.text,
-      assistantBackend: chat.backend || 'deterministic',
+      assistantBackend: chat.backend || 'llm-gemini',
       model: inference.engine,
       engine: inference.engine,
       confidence: inference.confidence,
@@ -186,51 +238,36 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         message: 'Request body exceeded limit. Send compact context only.',
       })
     }
-    const safeMean = toNumber(req.body?.ndviData?.stats?.mean ?? req.body?.context?.ndviStats?.mean, 0.4)
-    const riskLabel = safeMean < 0.3 ? 'high' : safeMean < 0.45 ? 'moderate' : 'low'
-    const fallbackText = [
-      `AI Assistant is running in degraded mode (${message || 'inference unavailable'}).`,
-      `Current NDVI mean indicates ${riskLabel} vegetation stress risk.`,
-      'Recommended next steps:',
-      '1. Re-run analysis for the same AOI and compare the selected 3x3 cell.',
-      '2. Prioritize irrigation uniformity checks in stressed cells.',
-      '3. Re-check within 24-48 hours after intervention.',
-    ].join('\n')
-    const fallbackActions = [
-      'Re-run analysis for the same AOI and compare selected plot points.',
-      'Prioritize irrigation uniformity checks in stressed cells.',
-      'Re-check within 24-48 hours after intervention.',
-    ]
-
     return res.status(200).json({
       success: true,
-      degraded: true,
-      warnings: [message || 'ML inference unavailable; fallback response returned.'],
-      answer: fallbackText,
+      unavailable: true,
+      retryAfterMs: 8000,
+      warnings: [message || 'gemini_unavailable'],
+      answer: unavailableAnswer(8000),
       sections: {
-        rationale: `Current NDVI mean indicates ${riskLabel} vegetation stress risk.`,
-        actions: fallbackActions,
+        rationale: 'The assistant backend did not produce a valid response.',
+        actions: ['Retry in a few seconds.', 'If the issue persists, verify Gemini API configuration and quota.'],
       },
       renderModel: 'qa',
       usedHistory: false,
-      suggestion: fallbackText,
-      output: fallbackText,
-      assistantBackend: 'deterministic',
-      model: 'agrisense-ml-fallback',
-      engine: 'agrisense-ml-fallback',
-      confidence: 0.42,
+      suggestion: unavailableAnswer(8000),
+      output: unavailableAnswer(8000),
+      assistantBackend: 'unavailable',
+      model: 'agrisense-ml-engine',
+      engine: 'agrisense-ml-engine',
+      confidence: 0,
       objective: req.body?.objective || 'balanced',
       dataQuality: {
-        completeness: 0.5,
-        providerQuality: 0.5,
-        score: 0.42,
+        completeness: 0,
+        providerQuality: 0,
+        score: 0,
         isSimulatedInputs: true,
-        warnings: ['Fallback assistant response'],
+        warnings: ['Assistant unavailable'],
       },
       isSimulatedInputs: true,
       inference: null,
       intent: 'general',
-      intentConfidence: 0.3,
+      intentConfidence: 0,
       mode: req.body?.mode || 'status',
       evidence: [],
       tasks: [],
@@ -241,8 +278,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       llmRetries: 0,
       llmDegraded: true,
       confidenceBreakdown: {
-        model: 0.42,
-        dataQuality: 0.42,
+        model: 0,
+        dataQuality: 0,
       },
       timestamp: new Date().toISOString(),
     })

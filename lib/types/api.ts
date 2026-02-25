@@ -83,6 +83,9 @@ export type LlmDiagnostics = {
   llmFinalModel: string | null
   llmRetries: number
   llmDegraded: boolean
+  unavailable?: boolean
+  retryAfterMs?: number
+  assistantBackend?: 'llm-gemini' | 'unavailable'
 }
 
 export type GeoJsonPolygon = {
