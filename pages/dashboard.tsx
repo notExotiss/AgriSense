@@ -2,7 +2,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { Activity, AlertTriangle, Cloud, Database, Droplets, Leaf, Loader2, Save, ShieldCheck, Waves } from 'lucide-react'
-import { GoogleAuthProvider, signInWithRedirect } from 'firebase/auth'
 import { motion } from 'framer-motion'
 import { toast } from 'sonner'
 import NavBar from '../components/NavBar'
@@ -12,6 +11,7 @@ import AoiGridImageOverlay from '../components/AoiGridImageOverlay'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
 import { auth, isFirebaseClientConfigured } from '../lib/firebaseClient'
+import { mapGoogleSignInError, signInWithGoogle } from '../lib/client/auth'
 import { ApiClientError, mapSaveError, savePlot } from '../lib/client/api'
 import { canvasToBase64Png, renderMetricCanvas } from '../lib/visual/metric-render'
 import type { GeocodePlace, GridCellSummary, ProviderDiagnostic } from '../lib/types/api'
@@ -400,10 +400,11 @@ export default function Dashboard() {
 
   async function ensureSignedIn() {
     if (!authConfigured || !auth) throw new Error('Firebase Auth is not configured')
-    if (auth.currentUser) return auth.currentUser
-    const provider = new GoogleAuthProvider()
-    await signInWithRedirect(auth, provider)
-    throw new Error('Sign-in required')
+    try {
+      return await signInWithGoogle(auth)
+    } catch (error) {
+      throw new Error(mapGoogleSignInError(error))
+    }
   }
 
   async function geocode() {
@@ -684,6 +685,7 @@ export default function Dashboard() {
     setSaving(true)
     try {
       const signedUser = await ensureSignedIn()
+      if (!signedUser) return
       const token = await signedUser.getIdToken(true)
       const drawnPolygon = polygonStateToGeojson(polygon as any[])
       const fallbackPolygon = {

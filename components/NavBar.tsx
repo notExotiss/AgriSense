@@ -21,6 +21,13 @@ const navLinks = [
   { href: '/account', label: 'Account' },
 ]
 
+const gatedRoutePattern = /^\/(dashboard|plots|account|ingest)(\/|$)/
+
+function resolveNavHref(href: string) {
+  if (!gatedRoutePattern.test(href)) return href
+  return `/api/session/enter?next=${encodeURIComponent(href)}`
+}
+
 export default function NavBar() {
   const [alerts, setAlerts] = React.useState<AlertItem[]>([])
   const [mobileOpen, setMobileOpen] = React.useState(false)
@@ -55,7 +62,7 @@ export default function NavBar() {
             {navLinks.map((link) => (
               <Link
                 key={link.href}
-                href={link.href}
+                href={resolveNavHref(link.href)}
                 className="text-sm font-medium text-muted-foreground transition hover:text-primary"
               >
                 {link.label}
@@ -95,7 +102,7 @@ export default function NavBar() {
               {navLinks.map((link) => (
                 <Link
                   key={link.href}
-                  href={link.href}
+                  href={resolveNavHref(link.href)}
                   onClick={() => setMobileOpen(false)}
                   className="block rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-primary"
                 >

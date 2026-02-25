@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { GoogleAuthProvider, onAuthStateChanged, signInWithRedirect, signOut } from 'firebase/auth'
+import { onAuthStateChanged, signOut } from 'firebase/auth'
 import { Loader2, UserCircle2 } from 'lucide-react'
 import NavBar from '../components/NavBar'
 import { Button } from '../components/ui/button'
 import { auth, isFirebaseClientConfigured } from '../lib/firebaseClient'
+import { mapGoogleSignInError, signInWithGoogle } from '../lib/client/auth'
 import { ApiClientError, fetchPlots, mapSaveError } from '../lib/client/api'
 import { toast } from 'sonner'
 
@@ -54,8 +55,11 @@ export default function Account() {
 
   async function signIn() {
     if (!authConfigured || !auth) return
-    const provider = new GoogleAuthProvider()
-    await signInWithRedirect(auth, provider)
+    try {
+      await signInWithGoogle(auth)
+    } catch (error) {
+      toast.error(mapGoogleSignInError(error))
+    }
   }
 
   async function handleSignOut() {
