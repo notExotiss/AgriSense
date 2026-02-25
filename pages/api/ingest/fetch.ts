@@ -51,6 +51,7 @@ async function legacyIngest(req: NextApiRequest) {
         height: null,
         stats: { min: 0, max: 0, mean: 0, p10: 0, p90: 0 },
         validPixelRatio: 0,
+        grid3x3: [],
       },
       assets: {
         b04: b04Url,

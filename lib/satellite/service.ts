@@ -1,5 +1,6 @@
 import { PNG } from 'pngjs'
 import { fromArrayBuffer } from 'geotiff'
+import type { GridCellSummary } from '../types/api'
 
 export type IngestPolicy = 'balanced' | 'lowest-cloud' | 'most-recent'
 export type IngestProvider = 'planetary-computer-preview' | 'sentinel-hub-cdse'
@@ -25,6 +26,13 @@ export type IngestResult = {
     previewPng: string
     width: number
     height: number
+    metricGrid?: {
+      encoded: string
+      width: number
+      height: number
+      min: number
+      max: number
+    }
     stats: {
       min: number
       max: number
@@ -33,6 +41,7 @@ export type IngestResult = {
       p90: number
     }
     validPixelRatio: number
+    grid3x3: GridCellSummary[]
   }
 }
 
@@ -225,6 +234,7 @@ function computeNdviFromPngBuffers(redBuffer: Buffer, nirBuffer: Buffer) {
   const height = red.height
   const pixelCount = width * height
   const ndviValues = new Float32Array(pixelCount)
+  const validMask = new Uint8Array(pixelCount)
 
   let min = Number.POSITIVE_INFINITY
   let max = Number.NEGATIVE_INFINITY
@@ -240,6 +250,7 @@ function computeNdviFromPngBuffers(redBuffer: Buffer, nirBuffer: Buffer) {
     let ndvi = 0
     if (den > 0) {
       ndvi = clamp((n - r) / den, -1, 1)
+      validMask[i] = 1
       validCount += 1
       validValues.push(ndvi)
       min = Math.min(min, ndvi)
@@ -266,7 +277,126 @@ function computeNdviFromPngBuffers(redBuffer: Buffer, nirBuffer: Buffer) {
       p90: round(p90),
     },
     validPixelRatio: round(validCount / Math.max(1, pixelCount), 4),
+    validMask,
   }
+}
+
+function classifyStress(mean: number, validPixelRatio: number): GridCellSummary['stressLevel'] {
+  if (validPixelRatio < 0.1) return 'unknown'
+  if (mean < 0.28) return 'high'
+  if (mean < 0.42) return 'moderate'
+  return 'low'
+}
+
+function computeGrid3x3(
+  ndviValues: Float32Array,
+  width: number,
+  height: number,
+  validMask?: Uint8Array
+) {
+  const cells: GridCellSummary[] = []
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      const x0 = Math.floor((col / 3) * width)
+      const x1 = Math.floor(((col + 1) / 3) * width)
+      const y0 = Math.floor((row / 3) * height)
+      const y1 = Math.floor(((row + 1) / 3) * height)
+
+      let min = Number.POSITIVE_INFINITY
+      let max = Number.NEGATIVE_INFINITY
+      let sum = 0
+      let count = 0
+      let valid = 0
+      const total = Math.max(1, (x1 - x0) * (y1 - y0))
+
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const idx = y * width + x
+          const value = Number(ndviValues[idx])
+          if (!Number.isFinite(value)) continue
+          count += 1
+          min = Math.min(min, value)
+          max = Math.max(max, value)
+          sum += value
+          if (validMask?.[idx]) valid += 1
+        }
+      }
+
+      const mean = count ? sum / count : 0
+      const validPixelRatio = validMask ? valid / total : count / total
+      cells.push({
+        cellId: `${row}-${col}`,
+        row,
+        col,
+        mean: round(mean, 4),
+        min: round(count ? min : 0, 4),
+        max: round(count ? max : 0, 4),
+        validPixelRatio: round(validPixelRatio, 4),
+        stressLevel: classifyStress(mean, validPixelRatio),
+      })
+    }
+  }
+  return cells
+}
+
+function downsampleNdviGrid(
+  ndviValues: Float32Array,
+  width: number,
+  height: number,
+  targetSize = 128
+) {
+  const outputWidth = Math.max(1, Math.min(targetSize, width))
+  const outputHeight = Math.max(1, Math.min(targetSize, height))
+  const values = new Float32Array(outputWidth * outputHeight)
+
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+
+  for (let outY = 0; outY < outputHeight; outY++) {
+    const y0 = Math.floor((outY / outputHeight) * height)
+    const y1 = Math.min(height, Math.ceil(((outY + 1) / outputHeight) * height))
+
+    for (let outX = 0; outX < outputWidth; outX++) {
+      const x0 = Math.floor((outX / outputWidth) * width)
+      const x1 = Math.min(width, Math.ceil(((outX + 1) / outputWidth) * width))
+
+      let sum = 0
+      let count = 0
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const idx = y * width + x
+          const value = ndviValues[idx]
+          if (!Number.isFinite(value)) continue
+          sum += value
+          count += 1
+        }
+      }
+
+      const sampled = count ? sum / count : 0
+      const outputIndex = outY * outputWidth + outX
+      values[outputIndex] = sampled
+      min = Math.min(min, sampled)
+      max = Math.max(max, sampled)
+    }
+  }
+
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    min = 0
+    max = 0
+  }
+
+  return {
+    values,
+    width: outputWidth,
+    height: outputHeight,
+    min,
+    max,
+  }
+}
+
+function encodeFloat32Grid(values: Float32Array) {
+  const buffer = Buffer.from(values.buffer, values.byteOffset, values.byteLength)
+  return buffer.toString('base64')
 }
 
 function ndviToColor(ndvi: number): [number, number, number] {
@@ -347,6 +477,8 @@ async function runPlanetaryComputerProvider(input: Required<IngestRequest>): Pro
 
   const ndvi = computeNdviFromPngBuffers(redBuffer, nirBuffer)
   const previewPng = renderNdviPngBase64(ndvi.ndviValues, ndvi.width, ndvi.height)
+  const grid3x3 = computeGrid3x3(ndvi.ndviValues, ndvi.width, ndvi.height, ndvi.validMask)
+  const metricGrid = downsampleNdviGrid(ndvi.ndviValues, ndvi.width, ndvi.height, 128)
 
   return {
     provider: 'planetary-computer-preview',
@@ -362,8 +494,16 @@ async function runPlanetaryComputerProvider(input: Required<IngestRequest>): Pro
       previewPng,
       width: ndvi.width,
       height: ndvi.height,
+      metricGrid: {
+        encoded: encodeFloat32Grid(metricGrid.values),
+        width: metricGrid.width,
+        height: metricGrid.height,
+        min: round(metricGrid.min, 4),
+        max: round(metricGrid.max, 4),
+      },
       stats: ndvi.stats,
       validPixelRatio: ndvi.validPixelRatio,
+      grid3x3,
     },
   }
 }
@@ -461,12 +601,21 @@ async function runSentinelHubProvider(input: Required<IngestRequest>): Promise<I
   const tiff = await fromArrayBuffer(tiffArrayBuffer)
   const image = await tiff.getImage()
   const raster: any = await image.readRasters({ interleave: true })
-  const ndviValues = raster as Float32Array
+  const rawValues = raster as Float32Array
+  const ndviValues = new Float32Array(rawValues.length)
+  const validMask = new Uint8Array(rawValues.length)
 
   const valid: number[] = []
-  for (let i = 0; i < ndviValues.length; i++) {
-    const value = clamp(Number(ndviValues[i]), -1, 1)
-    if (Number.isFinite(value)) valid.push(value)
+  for (let i = 0; i < rawValues.length; i++) {
+    const raw = Number(rawValues[i])
+    if (!Number.isFinite(raw)) {
+      ndviValues[i] = 0
+      continue
+    }
+    const value = clamp(raw, -1, 1)
+    ndviValues[i] = value
+    validMask[i] = 1
+    valid.push(value)
   }
 
   valid.sort((a, b) => a - b)
@@ -498,6 +647,8 @@ async function runSentinelHubProvider(input: Required<IngestRequest>): Promise<I
   }
 
   const pngBuffer = Buffer.from(await pngResponse.arrayBuffer())
+  const grid3x3 = computeGrid3x3(ndviValues, input.targetSize, input.targetSize, validMask)
+  const metricGrid = downsampleNdviGrid(ndviValues, input.targetSize, input.targetSize, 128)
 
   return {
     provider: 'sentinel-hub-cdse',
@@ -513,6 +664,13 @@ async function runSentinelHubProvider(input: Required<IngestRequest>): Promise<I
       previewPng: pngBuffer.toString('base64'),
       width: input.targetSize,
       height: input.targetSize,
+      metricGrid: {
+        encoded: encodeFloat32Grid(metricGrid.values),
+        width: metricGrid.width,
+        height: metricGrid.height,
+        min: round(metricGrid.min, 4),
+        max: round(metricGrid.max, 4),
+      },
       stats: {
         min: round(min),
         max: round(max),
@@ -521,6 +679,7 @@ async function runSentinelHubProvider(input: Required<IngestRequest>): Promise<I
         p90: round(p90),
       },
       validPixelRatio: round(valid.length / Math.max(1, ndviValues.length), 4),
+      grid3x3,
     },
   }
 }

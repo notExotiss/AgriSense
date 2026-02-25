@@ -4,6 +4,8 @@ import 'leaflet-draw/dist/leaflet.draw.css'
 import 'leaflet-draw'
 import L, { LatLngBoundsExpression, LatLngExpression } from 'leaflet'
 import { useEffect, useRef, useMemo } from 'react'
+import AoiGridMapOverlay from './AoiGridMapOverlay'
+import type { GridCellSummary } from '../lib/types/api'
 
 // Fix Leaflet default icons
 delete (L.Icon.Default.prototype as any)._getIconUrl
@@ -19,7 +21,7 @@ interface Hotspot { position: LatLngExpression; label: string; }
  * MapView props:
  * - ndviPng: (optional) base64 png (without data: prefix) - existing behavior preserved
  * - processedOverlayUrl: (optional) prefer a processed PNG hosted in public/ (e.g. /processed_topo.png)
- * - smoothOverlay: (optional) default true — apply browser smoothing + gentle filters
+ * - smoothOverlay: (optional) default true; apply browser smoothing and gentle filters
  * - overlayOpacity: (optional) default 0.85
  */
 export default function MapView({
@@ -32,7 +34,11 @@ export default function MapView({
   hotspots,
   processedOverlayUrl,
   smoothOverlay = true,
-  overlayOpacity = 0.85
+  overlayOpacity = 0.85,
+  grid3x3,
+  selectedCell,
+  onSelectCell,
+  showGrid = true,
 }:{
   bbox?: [number,number,number,number],
   onBboxChange?: (bbox:[number,number,number,number])=>void,
@@ -43,7 +49,11 @@ export default function MapView({
   hotspots?: Hotspot[],
   processedOverlayUrl?: string,
   smoothOverlay?: boolean,
-  overlayOpacity?: number
+  overlayOpacity?: number,
+  grid3x3?: GridCellSummary[],
+  selectedCell?: string | null,
+  onSelectCell?: (cellId: string) => void,
+  showGrid?: boolean
 }) {
   const mapRef = useRef<L.Map|null>(null)
 
@@ -137,8 +147,8 @@ export default function MapView({
     if (document.getElementById(id)) return
     const style = document.createElement('style')
     style.id = id
-    // image-rendering: auto + -webkit-optimize-contrast helps browsers avoid nearest-neighbor scaling
-    // filter: blur + contrast + saturate gives a gentle smoothing and reduces harsh spikes
+    // image-rendering: auto + -webkit-optimize-contrast helps browsers avoid nearest-neighbor scaling.
+    // filter: blur + contrast + saturate gives a gentle smoothing and reduces harsh spikes.
     style.textContent = `
       .leaflet-image-smooth {
         image-rendering: auto !important;
@@ -152,23 +162,24 @@ export default function MapView({
       }
     `
     document.head.appendChild(style)
-    return () => { /* keep it for app lifetime — no cleanup required */ }
+    return () => { /* keep it for app lifetime; no cleanup required */ }
   }, [smoothOverlay])
 
   // Build the overlay element if we have an image + bounds
-  const overlay = (overlayUrl && ndviBounds && ndviBounds.length === 4) ? (
+  const overlayBounds = ndviBounds && ndviBounds.length === 4
+    ? ([[ndviBounds[1], ndviBounds[0]], [ndviBounds[3], ndviBounds[2]]] as LatLngBoundsExpression)
+    : null
+
+  const overlay = overlayUrl && overlayBounds ? (
     <AnyImage
-      // data URL or hosted URL (prefer hosted processed image)
       url={overlayUrl}
-      bounds={[[ndviBounds[1], ndviBounds[0]], [ndviBounds[3], ndviBounds[2]]] as LatLngBoundsExpression}
+      bounds={overlayBounds}
       opacity={overlayOpacity}
-      crossOrigin="anonymous"           // allow future canvas operations if desired
+      crossOrigin="anonymous"
       className={`leaflet-image-smooth ${smoothOverlay ? 'smooth-filter' : ''}`}
-      // inline style fallback for browsers that don't pick up the stylesheet
       style={{
         imageRendering: 'auto',
-        // small transform hack to trigger GPU acceleration and better interpolation
-        transform: 'translateZ(0)'
+        transform: 'translateZ(0)',
       }}
     />
   ) : null
@@ -185,6 +196,13 @@ export default function MapView({
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
       {overlay}
+      <AoiGridMapOverlay
+        bbox={ndviBounds || bbox}
+        cells={grid3x3}
+        selectedCell={selectedCell}
+        onSelectCell={onSelectCell}
+        visible={Boolean(showGrid && (ndviBounds || bbox))}
+      />
       {polygon && polygon.length>0 && (
         <Polygon positions={polygon} pathOptions={{ color: '#16a34a', weight: 2 }} />
       )}
@@ -196,3 +214,4 @@ export default function MapView({
     </AnyMap>
   )
 }
+

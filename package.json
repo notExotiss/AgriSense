@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node ./scripts/dev-guard.cjs && node ./scripts/clean-next.cjs --guarded && next dev -p 3000",
+    "dev:doctor": "node ./scripts/dev-doctor.cjs",
+    "clean:next": "node ./scripts/clean-next.cjs",
     "build": "next build && npm run copy:next",
     "copy:next": "node ./scripts/copy-next.cjs",
     "start": "next start",
@@ -13,7 +15,6 @@
     "@deck.gl/core": "^9.2.2",
     "@deck.gl/layers": "^9.2.2",
     "@deck.gl/react": "^9.2.2",
-    "@google/generative-ai": "^0.3.0",
     "@radix-ui/react-dialog": "^1.1.14",
     "@types/mapbox-gl": "^3.4.1",
     "canvas": "^3.1.2",

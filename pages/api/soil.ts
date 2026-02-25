@@ -110,6 +110,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         success: true,
         source: 'Open-Meteo',
         isSimulated: false,
+        cacheHit: false,
+        warnings: [],
+        providersTried: [{ provider: 'open-meteo-soil', ok: true }],
         data: {
           soilMoisture: grid.encoded,
           stats: grid.stats,
@@ -126,7 +129,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         success: true,
         source: 'Simulated fallback (Open-Meteo unavailable)',
         isSimulated: true,
-        warning: providerError?.message || 'soil_provider_failed',
+        cacheHit: false,
+        warnings: [providerError?.message || 'soil_provider_failed'],
+        providersTried: [{ provider: 'open-meteo-soil', ok: false, reason: providerError?.message || 'soil_provider_failed' }],
         data: {
           soilMoisture: fallback.encoded,
           stats: fallback.stats,

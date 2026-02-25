@@ -229,6 +229,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         success: true,
         source: 'Open-Meteo',
         isSimulated: false,
+        cacheHit: false,
+        warnings: [],
+        providersTried: [{ provider: 'open-meteo-weather', ok: true }],
         data,
       })
     } catch (error: any) {
@@ -237,7 +240,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         success: true,
         source: 'Simulated fallback (Open-Meteo unavailable)',
         isSimulated: true,
-        warning: error?.message || 'weather_provider_failed',
+        cacheHit: false,
+        warnings: [error?.message || 'weather_provider_failed'],
+        providersTried: [{ provider: 'open-meteo-weather', ok: false, reason: error?.message || 'weather_provider_failed' }],
         data: fallback,
       })
     }

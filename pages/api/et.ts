@@ -106,6 +106,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         success: true,
         source: 'Open-Meteo',
         isSimulated: false,
+        cacheHit: false,
+        warnings: [],
+        providersTried: [{ provider: 'open-meteo-et', ok: true }],
         data: {
           evapotranspiration: grid.encoded,
           stats: grid.stats,
@@ -122,7 +125,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         success: true,
         source: 'Simulated fallback (Open-Meteo unavailable)',
         isSimulated: true,
-        warning: providerError?.message || 'et_provider_failed',
+        cacheHit: false,
+        warnings: [providerError?.message || 'et_provider_failed'],
+        providersTried: [{ provider: 'open-meteo-et', ok: false, reason: providerError?.message || 'et_provider_failed' }],
         data: {
           evapotranspiration: fallback.encoded,
           stats: fallback.stats,

@@ -1,14 +1,23 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
 import { getAdminDb, getAdminAuth } from '../../../../lib/firebaseAdmin'
 
+function toString(value: unknown) {
+  return String(value || '')
+}
+
+function isAdminConfigError(error: any) {
+  const code = toString(error?.code)
+  return code === 'firebase_admin_misconfigured' || toString(error?.name) === 'FirebaseAdminConfigError'
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse){
-  const db = getAdminDb()
-  const auth = getAdminAuth()
   const { id } = req.query
   if (!id || typeof id !== 'string') return res.status(400).json({ error: 'id required' })
 
   if (req.method === 'GET'){
     try{
+      const db = getAdminDb()
+      const auth = getAdminAuth()
       const idToken = (req.headers.authorization || '').replace('Bearer ','')
       if (!idToken) return res.status(401).json({ error: 'auth_required' })
       const decoded = await auth.verifyIdToken(idToken)
@@ -23,12 +32,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ items })
     } catch(e:any){
       console.error('timeseries GET', e?.message || e)
+      if (isAdminConfigError(e)) {
+        return res.status(503).json({
+          error: 'firebase_admin_misconfigured',
+          message: 'Server Firebase Admin credentials are not configured correctly.',
+          hint: e?.hint || 'Set FIREBASE_SERVICE_ACCOUNT_JSON with a valid private key and escaped newlines.',
+        })
+      }
+      if (toString(e?.message).toLowerCase().includes('token') || toString(e?.code).includes('auth')) {
+        return res.status(401).json({ error: 'invalid_auth' })
+      }
       return res.status(500).json({ error: 'internal' })
     }
   }
 
   if (req.method === 'POST'){
     try{
+      const db = getAdminDb()
+      const auth = getAdminAuth()
       const idToken = (req.headers.authorization || '').replace('Bearer ','')
       if (!idToken) return res.status(401).json({ error: 'auth_required' })
       const decoded = await auth.verifyIdToken(idToken)
@@ -45,6 +66,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(201).json({ id: ref.id })
     } catch(e:any){
       console.error('timeseries POST', e?.message || e)
+      if (isAdminConfigError(e)) {
+        return res.status(503).json({
+          error: 'firebase_admin_misconfigured',
+          message: 'Server Firebase Admin credentials are not configured correctly.',
+          hint: e?.hint || 'Set FIREBASE_SERVICE_ACCOUNT_JSON with a valid private key and escaped newlines.',
+        })
+      }
+      if (toString(e?.message).toLowerCase().includes('token') || toString(e?.code).includes('auth')) {
+        return res.status(401).json({ error: 'invalid_auth' })
+      }
       return res.status(500).json({ error: 'internal' })
     }
   }

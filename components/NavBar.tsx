@@ -1,133 +1,145 @@
-"use client"
+'use client'
 
-import React from "react"
-import Link from "next/link"
-import ThemeToggle from "./ThemeToggle"
-import { Satellite, Menu, Bell } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-  SheetTrigger,
-} from "../components/ui/sheet"
+import React from 'react'
+import Link from 'next/link'
+import { Bell, Menu, Satellite, X } from 'lucide-react'
+import { Button } from './ui/button'
+import ThemeToggle from './ThemeToggle'
+
+type AlertItem = {
+  id?: string
+  type?: 'critical' | 'warning'
+  message?: string
+  details?: string
+  plotName?: string
+}
+
+const navLinks = [
+  { href: '/', label: 'Home' },
+  { href: '/dashboard', label: 'Dashboard' },
+  { href: '/plots', label: 'Plots' },
+  { href: '/account', label: 'Account' },
+]
 
 export default function NavBar() {
-  const [showAlerts, setShowAlerts] = React.useState(false)
-  const [alerts, setAlerts] = React.useState<any[]>([])
+  const [alerts, setAlerts] = React.useState<AlertItem[]>([])
+  const [mobileOpen, setMobileOpen] = React.useState(false)
+  const [alertsOpen, setAlertsOpen] = React.useState(false)
 
-  React.useEffect(()=>{
-    const handler = (e:any)=> setAlerts(Array.isArray(e.detail) ? e.detail : [])
-    window.addEventListener('agrisense:alerts', handler as any)
-    return ()=> window.removeEventListener('agrisense:alerts', handler as any)
-  },[])
-
-  const criticalCount = alerts.filter(a=>a.type==='critical').length
-  const groups = React.useMemo(()=>{
-    const m: Record<string, any[]> = {}
-    for (const a of alerts){
-      const key = a.plotName || a.plotId || 'Current AOI'
-      if (!m[key]) m[key] = []
-      m[key].push(a)
+  React.useEffect(() => {
+    const handler = (event: Event) => {
+      const customEvent = event as CustomEvent<AlertItem[]>
+      setAlerts(Array.isArray(customEvent.detail) ? customEvent.detail : [])
     }
-    return m
-  }, [JSON.stringify(alerts)])
-  const [openKeys, setOpenKeys] = React.useState<Record<string, boolean>>({})
+    window.addEventListener('agrisense:alerts', handler)
+    return () => window.removeEventListener('agrisense:alerts', handler)
+  }, [])
+
+  const criticalCount = alerts.filter((alert) => alert.type === 'critical').length
 
   return (
-    <nav className="border-b bg-background/80 backdrop-blur-sm sticky top-0 z-50">
-      <div className="container mx-auto px-4">
-        <div className="flex items-center justify-between h-16">
-          {/* Logo */}
-          <div className="flex items-center gap-2">
-            <Satellite className="h-6 w-6 text-blue-600" />
-            <Link href="/" className="font-bold text-xl">
-              AgriSense
-            </Link>
-          </div>
+    <>
+      <header className="liquid-glass sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur">
+        <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between px-4 sm:px-6">
+          <Link href="/" className="inline-flex items-center gap-2">
+            <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+              <Satellite className="h-5 w-5" />
+            </span>
+            <span>
+              <span className="block text-sm font-semibold leading-none text-foreground">AgriSense</span>
+              <span className="block text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Field Ops</span>
+            </span>
+          </Link>
 
-          {/* Desktop Nav */}
-          <div className="hidden md:flex items-center gap-6">
-            <Link href="/dashboard" className="text-sm font-medium hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-              Dashboard
-            </Link>
-            <Link href="/plots" className="text-sm font-medium hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-              Plots
-            </Link>
-            <Link href="/account" className="text-sm font-medium hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-              Account
-            </Link>
-            <button className="relative" onClick={()=> setShowAlerts(v=>!v)} aria-label="Alerts">
-              <Bell className="h-5 w-5" />
-              {alerts.length>0 && (
-                <span className="absolute -top-1 -right-1 text-[10px] bg-red-600 text-white rounded-full px-1">
+          <nav className="hidden items-center gap-5 md:flex">
+            {navLinks.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                className="text-sm font-medium text-muted-foreground transition hover:text-primary"
+              >
+                {link.label}
+              </Link>
+            ))}
+          </nav>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setAlertsOpen((value) => !value)}
+              className="relative inline-flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground"
+              aria-label="Open alerts"
+            >
+              <Bell className="h-4 w-4" />
+              {alerts.length > 0 && (
+                <span className="absolute -right-1 -top-1 rounded-full bg-rose-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
                   {criticalCount || alerts.length}
                 </span>
               )}
             </button>
             <ThemeToggle />
-          </div>
 
-          {/* Mobile Menu */}
-          <Sheet>
-            <SheetTrigger asChild className="md:hidden">
-              <Button variant="ghost" size="sm">
-                <Menu className="h-5 w-5" />
-              </Button>
-            </SheetTrigger>
-            <SheetContent>
-              <SheetHeader>
-                <SheetTitle>Navigation</SheetTitle>
-                <SheetDescription>Access all AgriSense features</SheetDescription>
-              </SheetHeader>
-              <div className="flex flex-col gap-4 mt-6">
-                <Link href="/dashboard" className="text-sm font-medium">
-                  Dashboard
+            <Button
+              variant="outline"
+              size="icon"
+              className="md:hidden"
+              onClick={() => setMobileOpen((value) => !value)}
+            >
+              {mobileOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+            </Button>
+          </div>
+        </div>
+
+        {mobileOpen && (
+          <nav className="border-t border-border bg-background px-4 py-3 md:hidden">
+            <div className="space-y-2">
+              {navLinks.map((link) => (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  onClick={() => setMobileOpen(false)}
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-primary"
+                >
+                  {link.label}
                 </Link>
-                <Link href="/plots" className="text-sm font-medium">
-                  Plots
-                </Link>
-                <Link href="/account" className="text-sm font-medium">
-                  Account
-                </Link>
+              ))}
+              <div className="pt-2">
                 <ThemeToggle />
               </div>
-            </SheetContent>
-          </Sheet>
-        </div>
-      </div>
-      {/* Alerts Popup */}
-      {showAlerts && (
-        <div className="fixed right-4 top-16 z-50 w-80 rounded-lg border bg-background shadow">
-          <div className="p-3 border-b font-medium">Alerts</div>
-          <div className="max-h-80 overflow-auto p-2 space-y-2 text-sm">
-            {Object.keys(groups).length===0 ? (
-              <div className="text-muted-foreground p-2">No alerts</div>
-            ) : (
-              Object.entries(groups).map(([key, arr])=> (
-                <div key={key} className="rounded border">
-                  <button className="w-full text-left p-2 font-medium flex items-center justify-between" onClick={()=> setOpenKeys(s=> ({ ...s, [key]: !s[key] }))}>
-                    <span className="break-words">{key}</span>
-                    <span className="text-xs opacity-70">{arr.length}</span>
-                  </button>
-                  {openKeys[key] && (
-                    <div className="p-2 space-y-2">
-                      {arr.map((a:any)=> (
-                        <div key={a.id} className={`p-2 rounded border overflow-hidden break-words ${a.type==='critical' ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800' : 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800'}`}>
-                          <div className="font-medium break-words">{a.message}</div>
-                          <div className="opacity-80 break-words">{a.details}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
+            </div>
+          </nav>
+        )}
+      </header>
+
+      {alertsOpen && (
+        <aside className="liquid-glass fixed right-4 top-20 z-50 w-[min(95vw,26rem)] rounded-2xl border border-border bg-card shadow-xl">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <div>
+              <p className="text-sm font-semibold text-foreground">Alert Center</p>
+              <p className="text-xs text-muted-foreground">Active agronomy and system alerts</p>
+            </div>
+            <button onClick={() => setAlertsOpen(false)} className="text-muted-foreground hover:text-foreground">
+              <X className="h-4 w-4" />
+            </button>
           </div>
-        </div>
+          <div className="max-h-80 space-y-2 overflow-auto p-3">
+            {!alerts.length && <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">No active alerts.</p>}
+            {alerts.map((alert, index) => (
+              <article
+                key={`${alert.id || index}`}
+                className={
+                  alert.type === 'critical'
+                    ? 'alert-card alert-card-critical'
+                    : 'alert-card alert-card-warning'
+                }
+              >
+                <p className="alert-title">{alert.message || 'Alert'}</p>
+                <p className="alert-copy">{alert.details || 'No additional details provided.'}</p>
+                {alert.plotName && <p className="alert-meta">{alert.plotName}</p>}
+              </article>
+            ))}
+          </div>
+        </aside>
       )}
-    </nav>
+    </>
   )
 }

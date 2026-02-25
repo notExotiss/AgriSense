@@ -1,93 +1,127 @@
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
+import { GoogleAuthProvider, onAuthStateChanged, signInWithRedirect, signOut } from 'firebase/auth'
+import { Loader2, UserCircle2 } from 'lucide-react'
 import NavBar from '../components/NavBar'
 import { Button } from '../components/ui/button'
 import { auth, isFirebaseClientConfigured } from '../lib/firebaseClient'
-import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut } from 'firebase/auth'
+import { ApiClientError, fetchPlots, mapSaveError } from '../lib/client/api'
+import { toast } from 'sonner'
 
-export default function Account(){
+export default function Account() {
   const authConfigured = isFirebaseClientConfigured
   const [user, setUser] = useState<any>(null)
-  const [plots, setPlots] = useState<any[]>([])
-  const [loading, setLoading] = useState(false)
+  const [plotCount, setPlotCount] = useState(0)
+  const [loading, setLoading] = useState(true)
 
-  useEffect(()=>{
-    if (!authConfigured || !auth){
-      setUser(null)
-      setPlots([])
+  useEffect(() => {
+    if (!authConfigured || !auth) {
+      setLoading(false)
       return
     }
-
-    return onAuthStateChanged(auth, async (u)=>{
-      setUser(u)
-      if (u){
-        const token = await u.getIdToken()
-        const r = await fetch('/api/items', { headers: { Authorization: `Bearer ${token}` } })
-        const j = await r.json().catch(()=>({}))
-        setPlots(j.items || [])
-      } else {
-        setPlots([])
+    return onAuthStateChanged(auth, async (nextUser) => {
+      setUser(nextUser)
+      if (!nextUser) {
+        setPlotCount(0)
+        setLoading(false)
+        return
+      }
+      try {
+        const token = await nextUser.getIdToken(true)
+        let items
+        try {
+          items = await fetchPlots(token)
+        } catch (error) {
+          if (error instanceof ApiClientError && error.status === 401) {
+            const refreshedToken = await nextUser.getIdToken(true)
+            items = await fetchPlots(refreshedToken)
+          } else {
+            throw error
+          }
+        }
+        setPlotCount(items.length)
+      } catch (error) {
+        if (error instanceof ApiClientError && error.status === 401) {
+          toast.error('Session expired. Sign in again to load account data.')
+          return
+        }
+        toast.error(mapSaveError(error))
+      } finally {
+        setLoading(false)
       }
     })
-  },[])
+  }, [authConfigured])
 
-  async function signIn(){
+  async function signIn() {
     if (!authConfigured || !auth) return
     const provider = new GoogleAuthProvider()
-    try{
-      await signInWithPopup(auth, provider)
-    } catch {
-      try{ await signInWithRedirect(auth, provider) } catch {}
-    }
+    await signInWithRedirect(auth, provider)
   }
 
-  async function doSignOut(){
+  async function handleSignOut() {
     if (!authConfigured || !auth) return
     await signOut(auth)
+    setPlotCount(0)
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
+    <div className="min-h-screen">
       <NavBar />
-      <main className="max-w-6xl mx-auto p-6">
-        <h1 className="text-2xl font-bold mb-2">Account</h1>
-        {!authConfigured ? (
-          <div className="rounded border bg-card p-4">
-            <p className="text-sm text-muted-foreground">
-              Firebase Auth is not configured. Set `NEXT_PUBLIC_FIREBASE_*` variables in Vercel project settings.
-            </p>
-          </div>
-        ) : !user ? (
-          <div className="rounded border bg-card p-4">
-            <p className="text-sm text-muted-foreground mb-3">Sign in to save and manage your plots.</p>
-            <Button onClick={signIn}>Sign in with Google</Button>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <div className="rounded border bg-card p-4 flex items-center justify-between">
-              <div>
-                <div className="font-medium text-sm">{user.displayName || user.email}</div>
-                <div className="text-xs text-muted-foreground">UID: {user.uid}</div>
-              </div>
-              <Button variant="secondary" onClick={doSignOut}>Sign out</Button>
+      <main className="app-shell py-6">
+        <section className="surface-card p-5">
+          <h1 className="text-2xl font-semibold text-zinc-900">Account</h1>
+          <p className="mt-1 text-sm text-zinc-600">Identity, ownership, and persistence status.</p>
+
+          {!authConfigured && (
+            <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-600">
+              Firebase Auth is not configured. Add `NEXT_PUBLIC_FIREBASE_*` and `FIREBASE_SERVICE_ACCOUNT_JSON` in Vercel.
             </div>
-            <div className="rounded border bg-card p-4">
-              <div className="font-medium mb-2">Your Plots</div>
-              {plots.length === 0 ? (
-                <div className="text-sm text-muted-foreground">No plots yet.</div>
-              ) : (
-                <div className="grid md:grid-cols-2 gap-3">
-                  {plots.map((p)=> (
-                    <div key={p.id} className="border rounded p-3">
-                      <div className="text-sm">{p.name || 'Plot'}</div>
-                      <div className="text-xs text-muted-foreground">NDVI mean: {p?.ndviStats?.mean?.toFixed?.(2)}</div>
-                    </div>
-                  ))}
+          )}
+
+          {authConfigured && loading && (
+            <div className="mt-4 inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading account
+            </div>
+          )}
+
+          {authConfigured && !loading && !user && (
+            <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+              <p className="text-sm text-zinc-600">Sign in to save plots and access your analysis history.</p>
+              <Button className="mt-3" onClick={signIn}>
+                Sign in with Google
+              </Button>
+            </div>
+          )}
+
+          {authConfigured && user && !loading && (
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <article className="rounded-2xl border border-zinc-200 bg-white p-4">
+                <div className="flex items-center gap-3">
+                  <UserCircle2 className="h-10 w-10 text-emerald-800" />
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-900">{user.displayName || user.email || 'AgriSense User'}</p>
+                    <p className="text-xs text-zinc-500">{user.email || 'No email available'}</p>
+                  </div>
                 </div>
-              )}
+                <p className="mt-3 text-xs text-zinc-500">UID: {user.uid}</p>
+                <Button className="mt-3" variant="outline" onClick={handleSignOut}>
+                  Sign out
+                </Button>
+              </article>
+
+              <article className="rounded-2xl border border-zinc-200 bg-white p-4">
+                <p className="text-xs uppercase tracking-wide text-zinc-500">Saved plots</p>
+                <p className="mt-2 text-3xl font-semibold text-zinc-900">{plotCount}</p>
+                <p className="mt-1 text-sm text-zinc-600">All saved plots are scoped to your authenticated account.</p>
+                <Link href="/plots" className="mt-3 inline-block">
+                  <Button>Open plot library</Button>
+                </Link>
+              </article>
             </div>
-          </div>
-        )}
+          )}
+        </section>
       </main>
     </div>
   )
-} 
+}

@@ -1,5 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 :root {
-  --background: 0 0% 100%;
+  --background: 210 40% 98%;
   --foreground: 222.2 84% 4.9%;
 
   --card: 0 0% 100%;
@@ -9,7 +13,7 @@
   --popover-foreground: 222.2 84% 4.9%;
 
   --primary: 160 84% 35%;
-  --primary-foreground: 210 40% 98%;
+  --primary-foreground: 0 0% 100%;
 
   --secondary: 210 40% 96%;
   --secondary-foreground: 222.2 47.4% 11.2%;
@@ -20,14 +24,13 @@
   --accent: 210 40% 96%;
   --accent-foreground: 222.2 47.4% 11.2%;
 
-  --destructive: 0 84.2% 60.2%;
-  --destructive-foreground: 210 40% 98%;
+  --destructive: 358 74% 52%;
+  --destructive-foreground: 0 0% 100%;
 
   --border: 214.3 31.8% 91.4%;
   --input: 214.3 31.8% 91.4%;
   --ring: 160 84% 35%;
-
-  --radius: 0.5rem;
+  --radius: 0.9rem;
 }
 
 .dark {
@@ -52,36 +55,244 @@
   --accent: 217.2 32.6% 17.5%;
   --accent-foreground: 210 40% 98%;
 
-  --destructive: 0 62.8% 30.6%;
-  --destructive-foreground: 210 40% 98%;
+  --destructive: 358 80% 57%;
+  --destructive-foreground: 0 0% 100%;
 
   --border: 217.2 32.6% 17.5%;
   --input: 217.2 32.6% 17.5%;
   --ring: 160 84% 45%;
 }
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
 @layer base {
   * {
     @apply border-border;
   }
+
+  html,
+  body,
+  #__next {
+    height: 100%;
+  }
+
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+    font-family: 'IBM Plex Sans', 'Source Sans Pro', 'Segoe UI', 'Trebuchet MS', sans-serif;
+    background-color: hsl(var(--background));
   }
 }
 
 @layer utilities {
-  .scrollbar-hide {
-    -ms-overflow-style: none;
-    scrollbar-width: none;
+  .app-shell {
+    @apply mx-auto w-full max-w-7xl px-4 sm:px-6;
   }
-  .scrollbar-hide::-webkit-scrollbar {
-    display: none;
+
+  .surface-card {
+    @apply rounded-2xl border border-border bg-card shadow-sm shadow-zinc-900/5;
+  }
+
+  .liquid-glass {
+    background: color-mix(in oklab, hsl(var(--card)) 72%, transparent);
+    backdrop-filter: blur(12px) saturate(120%);
+    -webkit-backdrop-filter: blur(12px) saturate(120%);
+    border-color: color-mix(in oklab, hsl(var(--border)) 78%, white 22%);
+  }
+
+  .ops-panel {
+    @apply rounded-2xl border border-border bg-card shadow-sm;
+    background: color-mix(in oklab, hsl(var(--card)) 82%, transparent);
+  }
+
+  .hero-monitor {
+    @apply relative overflow-hidden rounded-2xl border border-border bg-card/95 p-4;
+    box-shadow: 0 12px 34px rgb(2 8 23 / 0.16);
+  }
+
+  .hero-monitor::before {
+    content: '';
+    position: absolute;
+    inset: -28% -20% auto auto;
+    width: 240px;
+    height: 240px;
+    background: radial-gradient(circle, rgb(34 211 238 / 0.18) 0%, transparent 68%);
+    pointer-events: none;
+  }
+
+  .hero-monitor-grid {
+    background-image:
+      linear-gradient(to right, rgb(148 163 184 / 0.12) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(148 163 184 / 0.12) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+
+  .ops-ticker-track {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    width: max-content;
+    padding-right: 1.5rem;
+    animation: opsTicker 24s linear infinite;
+  }
+
+  .ops-ticker-item {
+    @apply inline-flex items-center gap-2 rounded-full border border-border bg-background/75 px-3 py-1 text-xs text-muted-foreground;
+    white-space: nowrap;
+  }
+
+  .ops-ticker-dot {
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 9999px;
+    background: hsl(var(--primary));
+    box-shadow: 0 0 0 0.22rem color-mix(in oklab, hsl(var(--primary)) 22%, transparent);
+    flex-shrink: 0;
+  }
+
+  .telemetry-chip {
+    @apply inline-flex items-center gap-2 rounded-full border border-border bg-background/80 px-2.5 py-1 text-[11px] font-medium text-muted-foreground;
+  }
+
+  .metric-tile {
+    @apply rounded-xl border border-border bg-background/75 p-3;
+  }
+
+  .metric-label {
+    @apply text-[11px] uppercase tracking-[0.11em] text-muted-foreground;
+  }
+
+  .metric-value {
+    @apply mt-1 text-base font-semibold text-foreground;
+  }
+
+  .command-log-item {
+    @apply rounded-lg border border-border bg-background/70 px-2.5 py-2 text-xs text-muted-foreground;
+  }
+
+  .command-log-time {
+    @apply mr-1 font-semibold text-foreground;
+  }
+
+  .command-tab {
+    @apply rounded-full border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors;
+  }
+
+  .command-tab-active {
+    @apply border-primary/45 bg-primary/10 text-primary;
+  }
+
+  .status-chip {
+    @apply inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.12em];
+  }
+
+  .alert-card {
+    @apply rounded-xl border p-3;
+  }
+
+  .alert-card-critical {
+    @apply border-rose-200 bg-rose-50;
+  }
+
+  .alert-card-warning {
+    @apply border-amber-200 bg-amber-50;
+  }
+
+  .alert-title {
+    @apply text-sm font-semibold text-zinc-900;
+  }
+
+  .alert-copy {
+    @apply mt-1 text-xs text-zinc-700;
+  }
+
+  .alert-meta {
+    @apply mt-2 text-[11px] uppercase tracking-wide text-zinc-600;
   }
 }
 
-html, body, #__next { height: 100%; } 
-.leaflet-container { z-index: 0 !important; }
+@keyframes opsTicker {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.leaflet-container {
+  z-index: 0 !important;
+  border-radius: 1rem;
+}
+
+.dark .bg-white {
+  background-color: hsl(var(--card)) !important;
+}
+
+.dark .bg-zinc-50 {
+  background-color: hsl(var(--muted)) !important;
+}
+
+.dark .bg-zinc-100 {
+  background-color: hsl(var(--secondary)) !important;
+}
+
+.dark .text-zinc-900,
+.dark .text-zinc-800,
+.dark .text-zinc-700 {
+  color: hsl(var(--foreground)) !important;
+}
+
+.dark .text-zinc-600,
+.dark .text-zinc-500 {
+  color: hsl(var(--muted-foreground)) !important;
+}
+
+.dark .border-zinc-200,
+.dark .border-zinc-100,
+.dark .border-zinc-300 {
+  border-color: hsl(var(--border)) !important;
+}
+
+.dark .alert-card-critical {
+  border-color: rgb(127 29 29 / 0.9) !important;
+  background-color: rgb(69 10 10 / 0.6) !important;
+}
+
+.dark .alert-card-warning {
+  border-color: rgb(120 53 15 / 0.9) !important;
+  background-color: rgb(69 26 3 / 0.58) !important;
+}
+
+.dark .alert-title {
+  color: rgb(248 250 252) !important;
+}
+
+.dark .alert-copy {
+  color: rgb(226 232 240) !important;
+}
+
+.dark .alert-meta {
+  color: rgb(186 199 214) !important;
+}
+
+.dark .liquid-glass {
+  background: color-mix(in oklab, hsl(var(--card)) 62%, transparent);
+  border-color: color-mix(in oklab, hsl(var(--border)) 70%, white 10%);
+}
+
+.dark .ops-panel {
+  background: color-mix(in oklab, hsl(var(--card)) 70%, transparent);
+}
+
+.dark .hero-monitor {
+  background: color-mix(in oklab, hsl(var(--card)) 72%, transparent);
+  box-shadow: 0 14px 36px rgb(2 6 23 / 0.42);
+}
+
+.dark .hero-monitor::before {
+  background: radial-gradient(circle, rgb(56 189 248 / 0.2) 0%, transparent 68%);
+}
+
+.dark .telemetry-chip,
+.dark .metric-tile,
+.dark .command-log-item {
+  background-color: color-mix(in oklab, hsl(var(--background)) 65%, transparent);
+}

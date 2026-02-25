@@ -1,52 +1,8 @@
 {
-  "..\\node_modules\\geotiff\\dist-module\\compression\\index.js -> ./deflate.js": {
-    "id": 5522,
+  "_app.tsx -> mapbox-gl": {
+    "id": 6158,
     "files": [
-      "static/chunks/11e07bb4.9a3e68b75401fdc0.js",
-      "static/chunks/522.ef2be34859bd025e.js"
-    ]
-  },
-  "..\\node_modules\\geotiff\\dist-module\\compression\\index.js -> ./jpeg.js": {
-    "id": 9347,
-    "files": [
-      "static/chunks/347.9a03d5910066179c.js"
-    ]
-  },
-  "..\\node_modules\\geotiff\\dist-module\\compression\\index.js -> ./lerc.js": {
-    "id": 2175,
-    "files": [
-      "static/chunks/11e07bb4.9a3e68b75401fdc0.js",
-      "static/chunks/175.112763f408263ca8.js"
-    ]
-  },
-  "..\\node_modules\\geotiff\\dist-module\\compression\\index.js -> ./lzw.js": {
-    "id": 8672,
-    "files": [
-      "static/chunks/672.d3ce0aa02df8c560.js"
-    ]
-  },
-  "..\\node_modules\\geotiff\\dist-module\\compression\\index.js -> ./packbits.js": {
-    "id": 7411,
-    "files": [
-      "static/chunks/411.639f3f40e3f3f6ce.js"
-    ]
-  },
-  "..\\node_modules\\geotiff\\dist-module\\compression\\index.js -> ./raw.js": {
-    "id": 3321,
-    "files": [
-      "static/chunks/321.79c1b4d7067c816c.js"
-    ]
-  },
-  "..\\node_modules\\geotiff\\dist-module\\compression\\index.js -> ./webimage.js": {
-    "id": 1588,
-    "files": [
-      "static/chunks/588.1cc744fcb6ab4b67.js"
-    ]
-  },
-  "..\\node_modules\\geotiff\\dist-module\\compression\\index.js -> ./zstd.js": {
-    "id": 8062,
-    "files": [
-      "static/chunks/62.502aeeadc98d9789.js"
+      "static/chunks/2c796e83.127c3d2903fcdba8.js"
     ]
   },
   "_app.tsx -> sonner": {
@@ -55,30 +11,31 @@
       "static/chunks/712-dd286dff7ddafa6d.js"
     ]
   },
-  "dashboard.tsx -> ../components/InteractiveMap": {
-    "id": 8074,
+  "dashboard.tsx -> ../components/AoiTerrain3D": {
+    "id": 5957,
     "files": [
+      "static/chunks/2d36dd80.d365405a8f235841.js",
       "static/chunks/fb7d5399.d7b2a37773fa5fa4.js",
-      "static/chunks/2d36dd80.964c951ae41b2b7d.js",
-      "static/chunks/74.afb19355d6e056ca.js"
+      "static/chunks/365.2946d3d9eb5bcb4d.js",
+      "static/chunks/957.41f644640c6ef855.js"
     ]
   },
   "dashboard.tsx -> ../components/MapView": {
-    "id": 9963,
+    "id": 4246,
     "files": [
       "static/chunks/0b7b90cd.abad55a865e4a8c0.js",
-      "static/chunks/471.3bd05b44395e00ec.js",
+      "static/chunks/165.2a74788da7c23287.js",
       "static/css/43585300734e60e1.css",
-      "static/chunks/964.f8d767b585c294a3.js"
+      "static/chunks/99.a57f23b7dc9c93cd.js"
     ]
   },
-  "ingest.tsx -> ../components/MapView": {
-    "id": 9963,
+  "index.tsx -> ../components/home/HeroTerrainSequence": {
+    "id": 9780,
     "files": [
-      "static/chunks/0b7b90cd.abad55a865e4a8c0.js",
-      "static/chunks/471.3bd05b44395e00ec.js",
-      "static/css/43585300734e60e1.css",
-      "static/chunks/964.f8d767b585c294a3.js"
+      "static/chunks/2d36dd80.d365405a8f235841.js",
+      "static/chunks/fb7d5399.d7b2a37773fa5fa4.js",
+      "static/chunks/365.2946d3d9eb5bcb4d.js",
+      "static/chunks/780.3ddd33d165c34ed9.js"
     ]
   }
 }
