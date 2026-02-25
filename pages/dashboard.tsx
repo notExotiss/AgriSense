@@ -13,6 +13,7 @@ import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
 import { auth, isFirebaseClientConfigured } from '../lib/firebaseClient'
 import { ApiClientError, mapSaveError, savePlot } from '../lib/client/api'
+import { canvasToBase64Png, renderMetricCanvas } from '../lib/visual/metric-render'
 import type { GeocodePlace, GridCellSummary, ProviderDiagnostic } from '../lib/types/api'
 
 const MapView = dynamic(() => import('../components/MapView'), { ssr: false })
@@ -236,7 +237,7 @@ export default function Dashboard() {
     [gridCells, selectedCell]
   )
   const selectedPlotPoint = useMemo(() => plotPointLabel(selectedCellData), [selectedCellData])
-  const layerImage =
+  const providerLayerImage =
     layer === 'ndvi'
       ? ingest?.ndvi?.previewPng
       : layer === 'soil'
@@ -265,6 +266,33 @@ export default function Dashboard() {
     if (layer === 'et') return et?.metricGrid || null
     return ndviMetricGrid
   }, [layer, ndviMetricGrid, soil?.metricGrid, et?.metricGrid])
+
+  const renderedLayerImage = useMemo(() => {
+    if (typeof document === 'undefined') return null
+    if (!layerMetricGrid || !Array.isArray(layerMetricGrid.values)) return null
+    if (layerMetricGrid.width < 2 || layerMetricGrid.height < 2) return null
+    if (layerMetricGrid.values.length < layerMetricGrid.width * layerMetricGrid.height) return null
+    try {
+      const rendered = renderMetricCanvas({
+        metric: layer,
+        grid: {
+          values: layerMetricGrid.values,
+          width: layerMetricGrid.width,
+          height: layerMetricGrid.height,
+          min: layerMetricGrid.min,
+          max: layerMetricGrid.max,
+        },
+        outputWidth: layerMetricGrid.width,
+        outputHeight: layerMetricGrid.height,
+        contours: false,
+      })
+      return canvasToBase64Png(rendered.canvas)
+    } catch {
+      return null
+    }
+  }, [layer, layerMetricGrid])
+
+  const layerImage = renderedLayerImage || providerLayerImage
 
   const syncGridFrame = () => {
     const container = layerImageContainerRef.current
@@ -980,22 +1008,30 @@ export default function Dashboard() {
             </div>
 
             {layerImage ? (
-              <div ref={layerImageContainerRef} className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-100">
-                <img
-                  ref={layerImageRef}
-                  src={`data:image/png;base64,${layerImage}`}
-                  alt={`${layer} preview`}
-                  className="h-[24rem] w-full object-contain"
-                  onLoad={syncGridFrame}
-                />
-                <AoiGridImageOverlay
-                  cells={ingest?.ndvi?.grid3x3}
-                  selectedCell={selectedCell}
-                  onSelectCell={setSelectedCell}
-                  visible={showGrid}
-                  frame={gridFrame}
-                />
-              </div>
+              <>
+                <div ref={layerImageContainerRef} className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-100">
+                  <img
+                    ref={layerImageRef}
+                    src={`data:image/png;base64,${layerImage}`}
+                    alt={`${layer} preview`}
+                    className="h-[24rem] w-full object-contain"
+                    onLoad={syncGridFrame}
+                  />
+                  <AoiGridImageOverlay
+                    cells={ingest?.ndvi?.grid3x3}
+                    selectedCell={selectedCell}
+                    onSelectCell={setSelectedCell}
+                    visible={showGrid}
+                    frame={gridFrame}
+                  />
+                </div>
+                <p className="mt-2 text-xs text-zinc-600">
+                  Color source:{' '}
+                  {renderedLayerImage
+                    ? 'Quantitative metric grid (matches 3D terrain legend).'
+                    : 'Provider preview image (grid values unavailable).'}
+                </p>
+              </>
             ) : (
               <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 p-8 text-center text-sm text-zinc-600">Run analysis to generate layer outputs.</div>
             )}

@@ -7,29 +7,29 @@ export type ColorStop = {
 
 export const TOPO_PALETTES: Record<LayerMetric, ColorStop[]> = {
   ndvi: [
-    { stop: 0.0, color: [53, 74, 193] },
-    { stop: 0.15, color: [69, 138, 223] },
-    { stop: 0.32, color: [71, 192, 220] },
-    { stop: 0.48, color: [95, 205, 116] },
-    { stop: 0.64, color: [220, 211, 88] },
-    { stop: 0.8, color: [239, 163, 68] },
-    { stop: 1.0, color: [214, 83, 90] },
+    { stop: 0.0, color: [93, 123, 223] },
+    { stop: 0.16, color: [110, 177, 236] },
+    { stop: 0.32, color: [106, 219, 226] },
+    { stop: 0.5, color: [129, 216, 156] },
+    { stop: 0.68, color: [232, 220, 124] },
+    { stop: 0.84, color: [242, 176, 114] },
+    { stop: 1.0, color: [226, 126, 134] },
   ],
   soil: [
-    { stop: 0.0, color: [65, 83, 191] },
-    { stop: 0.2, color: [80, 145, 220] },
-    { stop: 0.4, color: [86, 196, 181] },
-    { stop: 0.58, color: [122, 203, 117] },
-    { stop: 0.76, color: [231, 195, 86] },
-    { stop: 1.0, color: [191, 96, 60] },
+    { stop: 0.0, color: [106, 128, 214] },
+    { stop: 0.2, color: [122, 182, 232] },
+    { stop: 0.4, color: [121, 219, 196] },
+    { stop: 0.58, color: [152, 214, 149] },
+    { stop: 0.76, color: [236, 204, 126] },
+    { stop: 1.0, color: [214, 139, 102] },
   ],
   et: [
-    { stop: 0.0, color: [55, 70, 189] },
-    { stop: 0.2, color: [64, 124, 221] },
-    { stop: 0.4, color: [78, 196, 215] },
-    { stop: 0.6, color: [108, 205, 112] },
-    { stop: 0.78, color: [239, 190, 82] },
-    { stop: 1.0, color: [209, 84, 72] },
+    { stop: 0.0, color: [98, 120, 218] },
+    { stop: 0.2, color: [109, 165, 232] },
+    { stop: 0.4, color: [114, 217, 223] },
+    { stop: 0.6, color: [146, 214, 149] },
+    { stop: 0.78, color: [241, 197, 116] },
+    { stop: 1.0, color: [226, 126, 110] },
   ],
 }
 
@@ -64,4 +64,3 @@ export function legendGradientCss(metric: LayerMetric) {
     .map((stop) => `rgb(${stop.color[0]}, ${stop.color[1]}, ${stop.color[2]}) ${Math.round(stop.stop * 100)}%`)
     .join(', ')})`
 }
-

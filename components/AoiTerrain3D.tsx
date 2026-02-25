@@ -4,7 +4,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Loader2, Mountain } from 'lucide-react'
-import { type LayerMetric, clamp, legendGradientCss, lerp, sampleTopographyPalette } from '../lib/visual/topography'
+import { type LayerMetric, clamp, legendGradientCss, lerp } from '../lib/visual/topography'
+import { renderMetricCanvas } from '../lib/visual/metric-render'
 
 type TerrainQuality = 'high' | 'balanced' | 'light'
 
@@ -114,165 +115,35 @@ function smoothDemGrid(values: number[], width: number, height: number, passes: 
   return current
 }
 
-async function loadImage(base64Png: string) {
-  return await new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new Image()
-    image.crossOrigin = 'anonymous'
-    image.onload = () => resolve(image)
-    image.onerror = () => reject(new Error('metric_texture_load_failed'))
-    image.src = `data:image/png;base64,${base64Png}`
-  })
-}
-
-async function createMetricTexture(
-  base64Png: string | null | undefined,
+function createMetricTexture(
   metricGrid: MetricGridData | null | undefined,
   metric: LayerMetric,
   width: number,
   height: number
-): Promise<{ texture: THREE.CanvasTexture; range: { min: number; max: number } }> {
-  let sourceWidth = width
-  let sourceHeight = height
-  let sourceValues = new Float32Array(width * height)
-  let min = Number.POSITIVE_INFINITY
-  let max = Number.NEGATIVE_INFINITY
+): { texture: THREE.CanvasTexture; range: { min: number; max: number } } {
+  if (!metricGrid) throw new Error('metric_grid_missing')
+  const rendered = renderMetricCanvas({
+    metric,
+    grid: {
+      values: metricGrid.values,
+      width: metricGrid.width,
+      height: metricGrid.height,
+      min: metricGrid.min,
+      max: metricGrid.max,
+    },
+    outputWidth: width,
+    outputHeight: height,
+    contours: false,
+  })
 
-  if (
-    metricGrid &&
-    Array.isArray(metricGrid.values) &&
-    metricGrid.width > 0 &&
-    metricGrid.height > 0 &&
-    metricGrid.values.length >= metricGrid.width * metricGrid.height
-  ) {
-    sourceWidth = metricGrid.width
-    sourceHeight = metricGrid.height
-    sourceValues = new Float32Array(sourceWidth * sourceHeight)
-
-    for (let i = 0; i < sourceWidth * sourceHeight; i++) {
-      const value = Number(metricGrid.values[i])
-      const safe = Number.isFinite(value) ? value : 0
-      sourceValues[i] = safe
-      min = Math.min(min, safe)
-      max = Math.max(max, safe)
-    }
-  } else if (base64Png) {
-    const image = await loadImage(base64Png)
-    const source = document.createElement('canvas')
-    source.width = width
-    source.height = height
-    const sourceCtx = source.getContext('2d')
-    if (!sourceCtx) throw new Error('metric_texture_context_failed')
-    sourceCtx.drawImage(image, 0, 0, width, height)
-
-    const imageData = sourceCtx.getImageData(0, 0, width, height)
-    const src = imageData.data
-    sourceValues = new Float32Array(width * height)
-
-    for (let i = 0; i < width * height; i++) {
-      const idx = i * 4
-      const alpha = src[idx + 3]
-      if (alpha < 5) {
-        sourceValues[i] = 0
-        continue
-      }
-      const luminance = (src[idx] * 0.2126 + src[idx + 1] * 0.7152 + src[idx + 2] * 0.0722) / 255
-      sourceValues[i] = luminance
-      min = Math.min(min, luminance)
-      max = Math.max(max, luminance)
-    }
-  } else {
-    throw new Error('metric_texture_missing')
-  }
-
-  if (!Number.isFinite(min) || !Number.isFinite(max)) {
-    if (metricGrid && Number.isFinite(metricGrid.min) && Number.isFinite(metricGrid.max) && metricGrid.max > metricGrid.min) {
-      min = metricGrid.min
-      max = metricGrid.max
-    } else {
-      min = 0
-      max = 1
-    }
-  }
-
-  const range = Math.max(1e-6, max - min)
-  const contourLevels = 18
-
-  const sampleRaw = (x: number, y: number) => {
-    const sx = clamp(x, 0, sourceWidth - 1)
-    const sy = clamp(y, 0, sourceHeight - 1)
-    const x0 = Math.floor(sx)
-    const y0 = Math.floor(sy)
-    const x1 = Math.min(sourceWidth - 1, x0 + 1)
-    const y1 = Math.min(sourceHeight - 1, y0 + 1)
-    const tx = sx - x0
-    const ty = sy - y0
-
-    const idx00 = y0 * sourceWidth + x0
-    const idx10 = y0 * sourceWidth + x1
-    const idx01 = y1 * sourceWidth + x0
-    const idx11 = y1 * sourceWidth + x1
-
-    const top = lerp(sourceValues[idx00], sourceValues[idx10], tx)
-    const bottom = lerp(sourceValues[idx01], sourceValues[idx11], tx)
-    return lerp(top, bottom, ty)
-  }
-
-  const sample = (x: number, y: number) => {
-    const sourceX = (x / Math.max(1, width - 1)) * (sourceWidth - 1)
-    const sourceY = (y / Math.max(1, height - 1)) * (sourceHeight - 1)
-    return (sampleRaw(sourceX, sourceY) - min) / range
-  }
-
-  const output = document.createElement('canvas')
-  output.width = width
-  output.height = height
-  const outCtx = output.getContext('2d')
-  if (!outCtx) throw new Error('metric_texture_output_failed')
-  const outData = outCtx.createImageData(width, height)
-  const dst = outData.data
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = y * width + x
-      const idx = i * 4
-      const value = sample(x, y)
-
-      const [rRaw, gRaw, bRaw] = sampleTopographyPalette(metric, value)
-      let r = rRaw
-      let g = gRaw
-      let b = bRaw
-
-      const level = value * contourLevels
-      const distToLevel = Math.abs(level - Math.round(level))
-      const contour = distToLevel < 0.02
-
-      if (contour) {
-        const contourAlpha = distToLevel < 0.009 ? 0.5 : 0.28
-        r = Math.round(lerp(r, 12, contourAlpha))
-        g = Math.round(lerp(g, 22, contourAlpha))
-        b = Math.round(lerp(b, 42, contourAlpha))
-      }
-
-      dst[idx] = r
-      dst[idx + 1] = g
-      dst[idx + 2] = b
-      dst[idx + 3] = 255
-    }
-  }
-
-  outCtx.putImageData(outData, 0, 0)
-
-  const texture = new THREE.CanvasTexture(output)
+  const texture = new THREE.CanvasTexture(rendered.canvas)
   texture.colorSpace = THREE.SRGBColorSpace
   texture.wrapS = THREE.ClampToEdgeWrapping
   texture.wrapT = THREE.ClampToEdgeWrapping
   texture.needsUpdate = true
   return {
     texture,
-    range: {
-      min,
-      max,
-    },
+    range: rendered.range,
   }
 }
 
@@ -459,6 +330,18 @@ export default function AoiTerrain3D({
   const [metricRange, setMetricRange] = useState<{ min: number; max: number } | null>(null)
   const selected = useMemo(() => parseCell(selectedCell), [selectedCell])
   const selectedLabel = useMemo(() => labelForCell(selectedCell), [selectedCell])
+  const hasMetricGrid = useMemo(
+    () =>
+      Boolean(
+        metricGrid &&
+        Array.isArray(metricGrid.values) &&
+        metricGrid.width > 1 &&
+        metricGrid.height > 1 &&
+        metricGrid.values.length >= metricGrid.width * metricGrid.height
+      ),
+    [metricGrid]
+  )
+  void texturePng
   const [isDarkTheme, setIsDarkTheme] = useState(() =>
     typeof document !== 'undefined' ? document.documentElement.classList.contains('dark') : false
   )
@@ -675,9 +558,10 @@ export default function AoiTerrain3D({
     const contourMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uMaxHeight: { value: elevationScale },
-        uDensity: { value: quality === 'high' ? 60 : quality === 'balanced' ? 48 : 36 },
-        uThickness: { value: 0.038 },
-        uOpacity: { value: isDarkTheme ? 0.7 : 0.62 },
+        uDensity: { value: quality === 'high' ? 38 : quality === 'balanced' ? 32 : 26 },
+        uThickness: { value: 0.034 },
+        uOpacity: { value: isDarkTheme ? 0.42 : 0.35 },
+        uLineColor: { value: new THREE.Color(isDarkTheme ? 0x1f3349 : 0x4f677f) },
       },
       vertexShader: `
         varying float vHeight;
@@ -692,12 +576,13 @@ export default function AoiTerrain3D({
         uniform float uDensity;
         uniform float uThickness;
         uniform float uOpacity;
+        uniform vec3 uLineColor;
         void main() {
           float f = fract(vHeight * uDensity);
           float d = min(f, 1.0 - f);
           float aa = fwidth(vHeight * uDensity) * 0.9;
           float line = 1.0 - smoothstep(uThickness, uThickness + aa, d);
-          gl_FragColor = vec4(vec3(0.08, 0.11, 0.16), line * uOpacity);
+          gl_FragColor = vec4(uLineColor, line * uOpacity);
         }
       `,
       transparent: true,
@@ -712,10 +597,13 @@ export default function AoiTerrain3D({
 
     let cancelled = false
     let metricTexture: THREE.CanvasTexture | null = null
+    if (!hasMetricGrid) {
+      setMetricRange(null)
+    }
     void (async () => {
-      if (!texturePng && !metricGrid) return
+      if (!hasMetricGrid) return
       try {
-        const rendered = await createMetricTexture(texturePng, metricGrid, layer, terrain.width, terrain.height)
+        const rendered = await createMetricTexture(metricGrid, layer, terrain.width, terrain.height)
         if (cancelled) {
           rendered.texture.dispose()
           return
@@ -922,7 +810,7 @@ export default function AoiTerrain3D({
         container.removeChild(renderer.domElement)
       }
     }
-  }, [open, terrain, texturePng, metricGrid, selectedCell, layer, quality, selectedLabel, isDarkTheme])
+  }, [open, terrain, metricGrid, selectedCell, layer, quality, selectedLabel, isDarkTheme, hasMetricGrid])
 
   if (!open) return null
 
@@ -948,6 +836,11 @@ export default function AoiTerrain3D({
           {error}
         </div>
       )}
+      {!hasMetricGrid && (
+        <div className="mb-2 rounded-lg border border-amber-700/50 bg-amber-500/10 px-2 py-1 text-xs text-amber-800 dark:text-amber-300">
+          Quantitative {layerLabel(layer)} grid is unavailable for this run, so numeric color overlay is disabled.
+        </div>
+      )}
       <div
         ref={mountRef}
         className={`h-[24rem] w-full overflow-hidden rounded-xl border border-border/70 ${
@@ -958,21 +851,21 @@ export default function AoiTerrain3D({
       />
       <div className="mt-2 rounded-lg border border-border/80 bg-muted/35 p-2">
         <p className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-          {layerLabel(layer)} scale {metricGrid?.isSimulated ? '(simulated)' : '(measured)'}
+          {layerLabel(layer)} scale {hasMetricGrid ? (metricGrid?.isSimulated ? '(simulated)' : '(measured)') : '(unavailable)'}
         </p>
         <div
           className="mt-1 h-3 w-full rounded"
           style={{ backgroundImage: legendGradientCss(layer) }}
         />
         <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>{(metricRange?.min ?? metricGrid?.min ?? 0).toFixed(3)}</span>
+          <span>{hasMetricGrid ? (metricRange?.min ?? metricGrid?.min ?? 0).toFixed(3) : 'N/A'}</span>
           <span>{layerUnits(layer, metricGrid)}</span>
-          <span>{(metricRange?.max ?? metricGrid?.max ?? 1).toFixed(3)}</span>
+          <span>{hasMetricGrid ? (metricRange?.max ?? metricGrid?.max ?? 1).toFixed(3) : 'N/A'}</span>
         </div>
       </div>
       <p className="mt-2 text-[11px] text-muted-foreground">
         {terrain
-          ? `High-fidelity topographic surface using ${layerLabel(layer)} color mapping. Selected plot point: ${selectedLabel || 'none'}${meshMeta ? ` | mesh ${meshMeta.resolution}px${meshMeta.smoothed ? ', smoothed' : ''}` : ''}.`
+          ? `High-fidelity topographic surface using ${layerLabel(layer)} color mapping from ${hasMetricGrid ? 'quantitative grid data' : 'neutral fallback shading'}. Selected plot point: ${selectedLabel || 'none'}${meshMeta ? ` | mesh ${meshMeta.resolution}px${meshMeta.smoothed ? ', smoothed' : ''}` : ''}.`
           : 'Terrain will appear when providers return valid DEM coverage for this AOI.'}
       </p>
     </div>

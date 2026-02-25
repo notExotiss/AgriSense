@@ -11,9 +11,17 @@ type LlmComposeInput = {
   context?: any
 }
 
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
-const DEFAULT_MODEL = 'gemini-1.5-flash'
-const DEFAULT_FALLBACK_MODELS = ['gemini-1.5-flash', 'gemini-1.5-flash-8b']
+const GEMINI_API_BASES = [
+  'https://generativelanguage.googleapis.com/v1beta/models',
+  'https://generativelanguage.googleapis.com/v1/models',
+]
+const DEFAULT_MODEL = 'gemini-2.5-flash'
+const DEFAULT_FALLBACK_MODELS = [
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+]
 const REQUEST_TIMEOUT_MS = 25000
 const MAX_RETRIES_PER_MODEL = 2
 
@@ -215,13 +223,19 @@ function buildSystemPrompt() {
 }
 
 function buildModelCandidates() {
-  const primary = process.env.GEMINI_MODEL || process.env.AGRISENSE_LLM_MODEL || DEFAULT_MODEL
+  const normalizeModelName = (value: string) =>
+    String(value || '')
+      .trim()
+      .replace(/^models\//i, '')
+      .replace(/:generateContent$/i, '')
+
+  const primary = normalizeModelName(process.env.GEMINI_MODEL || process.env.AGRISENSE_LLM_MODEL || DEFAULT_MODEL)
   const configuredFallback = String(process.env.GEMINI_FALLBACK_MODELS || '')
     .split(',')
-    .map((value) => value.trim())
+    .map((value) => normalizeModelName(value))
     .filter(Boolean)
 
-  const candidates = [primary, ...configuredFallback, ...DEFAULT_FALLBACK_MODELS]
+  const candidates = [primary, ...configuredFallback, ...DEFAULT_FALLBACK_MODELS.map((model) => normalizeModelName(model))]
   const unique: string[] = []
   for (const model of candidates) {
     if (!unique.includes(model)) unique.push(model)
@@ -256,21 +270,68 @@ async function requestGeminiContent(
   model: string,
   body: any
 ) {
-  const endpoint = `${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`
-  const response = await fetchWithTimeout(
-    endpoint,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    },
-    REQUEST_TIMEOUT_MS
-  )
-  return response
+  let fallbackResponse: Response | null = null
+  for (const base of GEMINI_API_BASES) {
+    const endpoint = `${base}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`
+    const response = await fetchWithTimeout(
+      endpoint,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      REQUEST_TIMEOUT_MS
+    )
+    if (response.status === 404) {
+      fallbackResponse = response
+      continue
+    }
+    return response
+  }
+  return fallbackResponse as Response
+}
+
+async function discoverGeminiModels(apiKey: string): Promise<string[]> {
+  const discovered: string[] = []
+  for (const base of GEMINI_API_BASES) {
+    try {
+      const endpoint = `${base}?key=${encodeURIComponent(apiKey)}`
+      const response = await fetchWithTimeout(endpoint, { method: 'GET' }, Math.min(REQUEST_TIMEOUT_MS, 8000))
+      if (!response.ok) continue
+      const payload = await response.json().catch(() => null)
+      const models: any[] = Array.isArray(payload?.models) ? payload.models : []
+      for (const model of models) {
+        const methods = Array.isArray(model?.supportedGenerationMethods) ? model.supportedGenerationMethods : []
+        if (!methods.some((method: string) => String(method).toLowerCase() === 'generatecontent')) continue
+        const name = String(model?.name || '').replace(/^models\//i, '').trim()
+        if (name) discovered.push(name)
+      }
+    } catch {
+      // ignore and keep trying alternate API base
+    }
+  }
+  return Array.from(new Set(discovered))
+}
+
+function parseGeminiError(text: string) {
+  const fallback = {
+    message: text.slice(0, 260),
+    status: 'UNKNOWN',
+  }
+  try {
+    const parsed = JSON.parse(text)
+    const err = parsed?.error
+    return {
+      message: String(err?.message || fallback.message),
+      status: String(err?.status || fallback.status),
+    }
+  } catch {
+    return fallback
+  }
 }
 
 export async function composeLlmChatResponse(input: LlmComposeInput): Promise<MLChatResponse | null> {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY
+  const apiKey = process.env.GEMINI_API_KEY || process.env.AGRISENSE_GEMINI_API_KEY
   if (!apiKey) return null
 
   const intent = classifyIntent(input.prompt || '')
@@ -283,10 +344,16 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
   let lastFailure = 'gemini_failed'
   let retryAfterMs: number | undefined
 
-  const contents: any[] = history.map((turn) => ({
+  const contents: any[] = [
+    {
+      role: 'user',
+      parts: [{ text: `System rules:\n${buildSystemPrompt()}` }],
+    },
+    ...history.map((turn) => ({
     role: turn.role,
     parts: [{ text: turn.text }],
-  }))
+  })),
+  ]
   contents.push({
     role: 'user',
     parts: [
@@ -307,19 +374,24 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
   })
 
   const requestBody = {
-    systemInstruction: {
-      parts: [{ text: buildSystemPrompt() }],
-    },
     contents,
     generationConfig: {
       temperature: 0.25,
       topP: 0.9,
       maxOutputTokens: 720,
-      responseMimeType: 'application/json',
     },
   }
 
-  const modelCandidates = buildModelCandidates()
+  const configuredCandidates = buildModelCandidates()
+  const discoveredCandidates = await discoverGeminiModels(apiKey)
+  const discoveredSet = new Set(discoveredCandidates)
+  const prioritizedConfigured =
+    discoveredSet.size > 0
+      ? configuredCandidates.filter((model) => discoveredSet.has(model))
+      : configuredCandidates
+  const modelCandidates: string[] = Array.from(
+    new Set<string>([...prioritizedConfigured, ...discoveredCandidates, ...configuredCandidates])
+  )
   for (const model of modelCandidates) {
     if (!attemptedModels.includes(model)) attemptedModels.push(model)
 
@@ -339,7 +411,26 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
 
       if (!response.ok) {
         const text = await response.text().catch(() => '')
-        lastFailure = `gemini_http_${response.status}:${text.slice(0, 220)}`
+        const parsedError = parseGeminiError(text)
+        const normalizedMessage = parsedError.message.toLowerCase()
+        const leakedKey =
+          normalizedMessage.includes('reported as leaked') ||
+          normalizedMessage.includes('api key') && normalizedMessage.includes('leaked')
+        const invalidKey =
+          normalizedMessage.includes('api key not valid') ||
+          normalizedMessage.includes('invalid api key')
+        const blocked =
+          normalizedMessage.includes('permission denied') ||
+          normalizedMessage.includes('not authorized')
+        if (leakedKey) {
+          lastFailure = 'gemini_key_leaked'
+        } else if (invalidKey) {
+          lastFailure = 'gemini_key_invalid'
+        } else if (blocked) {
+          lastFailure = `gemini_permission_denied:${parsedError.status}`
+        } else {
+          lastFailure = `gemini_http_${response.status}:${parsedError.status}:${parsedError.message.slice(0, 180)}`
+        }
         const retryAfterHeader = response.headers.get('retry-after')
         if (retryAfterHeader) {
           const seconds = Number(retryAfterHeader)

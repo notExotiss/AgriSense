@@ -87,34 +87,74 @@ function canvasToBase64Png(canvas: HTMLCanvasElement) {
   return canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, '')
 }
 
+function fract(value: number) {
+  return value - Math.floor(value)
+}
+
+function hash2(ix: number, iy: number) {
+  return fract(Math.sin(ix * 127.1 + iy * 311.7) * 43758.5453123)
+}
+
+function valueNoise2D(u: number, v: number, frequency: number) {
+  const x = u * frequency
+  const y = v * frequency
+  const x0 = Math.floor(x)
+  const y0 = Math.floor(y)
+  const x1 = x0 + 1
+  const y1 = y0 + 1
+  const tx = x - x0
+  const ty = y - y0
+  const sx = tx * tx * (3 - 2 * tx)
+  const sy = ty * ty * (3 - 2 * ty)
+  const n00 = hash2(x0, y0)
+  const n10 = hash2(x1, y0)
+  const n01 = hash2(x0, y1)
+  const n11 = hash2(x1, y1)
+  const nx0 = mix(n00, n10, sx)
+  const nx1 = mix(n01, n11, sx)
+  return mix(nx0, nx1, sy)
+}
+
 function createInstantHeroPayload(): HeroMapPayload {
   const width = 224
   const height = 156
   const values = new Float32Array(width * height)
-  let min = Number.POSITIVE_INFINITY
-  let max = Number.NEGATIVE_INFINITY
 
   for (let y = 0; y < height; y++) {
     const v = y / Math.max(1, height - 1)
     for (let x = 0; x < width; x++) {
       const u = x / Math.max(1, width - 1)
-      const ridges =
-        Math.sin((u * 4.8 + v * 1.9) * Math.PI) * 0.24 +
-        Math.cos((v * 3.1 - u * 0.8) * Math.PI) * 0.18 +
-        Math.sin(u * 9.2 * Math.PI) * Math.cos(v * 7.4 * Math.PI) * 0.12
-      const mound = Math.exp(-((u - 0.62) * (u - 0.62) * 9 + (v - 0.42) * (v - 0.42) * 14)) * 0.34
-      const valley = Math.exp(-((u - 0.28) * (u - 0.28) * 16 + (v - 0.66) * (v - 0.66) * 11)) * -0.22
-      const value = clamp(0.34 + ridges + mound + valley, -0.22, 0.76)
-      values[y * width + x] = value
-      if (value < min) min = value
-      if (value > max) max = value
+      const nx = u * 2 - 1
+      const ny = v * 2 - 1
+
+      const n1 = valueNoise2D(u, v, 2.1)
+      const n2 = valueNoise2D(u + 0.07, v - 0.03, 4.4)
+      const n3 = valueNoise2D(u - 0.04, v + 0.05, 8.8)
+
+      const broadRidge = Math.abs(Math.sin((u * 2.2 - v * 1.45) * Math.PI)) * 0.16
+      const basin = Math.exp(-(nx * nx * 0.78 + ny * ny * 1.22)) * 0.12
+      const northHill = Math.exp(-((u - 0.34) * (u - 0.34) * 18 + (v - 0.28) * (v - 0.28) * 14)) * 0.19
+      const eastHill = Math.exp(-((u - 0.74) * (u - 0.74) * 16 + (v - 0.52) * (v - 0.52) * 10)) * 0.17
+      const river = Math.exp(-Math.pow((u - 0.54) * 0.95 + (v - 0.44) * 1.55, 2) / 0.013) * 0.22
+
+      const terrain = 0.54 * n1 + 0.28 * n2 + 0.18 * n3 + broadRidge + basin + northHill + eastHill - river
+      values[y * width + x] = clamp(terrain - 0.24, -0.24, 0.78)
     }
   }
 
+  const smoothedValues = smoothGrid(values, width, height, 3)
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  for (let i = 0; i < smoothedValues.length; i++) {
+    const value = smoothedValues[i]
+    if (value < min) min = value
+    if (value > max) max = value
+  }
+
   const range = Math.max(1e-6, max - min)
-  const normalized = new Float32Array(values.length)
-  for (let i = 0; i < values.length; i++) {
-    normalized[i] = clamp((values[i] - min) / range, 0, 1)
+  const normalized = new Float32Array(smoothedValues.length)
+  for (let i = 0; i < smoothedValues.length; i++) {
+    normalized[i] = clamp((smoothedValues[i] - min) / range, 0, 1)
   }
 
   const get = (x: number, y: number) => {
@@ -139,7 +179,7 @@ function createInstantHeroPayload(): HeroMapPayload {
   const topoImg = topoCtx.createImageData(width, height)
   const topoPx = topoImg.data
 
-  const contourLevels = 21
+  const contourLevels = 18
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x
@@ -149,11 +189,11 @@ function createInstantHeroPayload(): HeroMapPayload {
       const sy = get(x, y + 1) - get(x, y - 1)
       const shade = clamp(0.82 - sx * 0.46 - sy * 0.38, 0.34, 1.14)
       const contourDistance = Math.abs(value * contourLevels - Math.round(value * contourLevels))
-      const contour = contourDistance < 0.03
+      const contour = contourDistance < 0.022
 
       const gray = Math.round(clamp(145 * shade + 34, 0, 255))
       if (contour) {
-        const alpha = contourDistance < 0.012 ? 0.6 : 0.36
+        const alpha = contourDistance < 0.009 ? 0.34 : 0.18
         outlinePx[out] = Math.round(gray * (1 - alpha * 0.4))
         outlinePx[out + 1] = Math.round(gray * (1 - alpha * 0.26))
         outlinePx[out + 2] = Math.round(gray * (1 - alpha * 0.12) + 90 * alpha)
@@ -169,7 +209,7 @@ function createInstantHeroPayload(): HeroMapPayload {
       let g = Math.round(clamp(gBase * shade, 0, 255))
       let b = Math.round(clamp(bBase * shade, 0, 255))
       if (contour) {
-        const alpha = contourDistance < 0.012 ? 0.55 : 0.32
+        const alpha = contourDistance < 0.009 ? 0.26 : 0.14
         r = Math.round((1 - alpha) * r + alpha * 10)
         g = Math.round((1 - alpha) * g + alpha * 22)
         b = Math.round((1 - alpha) * b + alpha * 46)
@@ -201,7 +241,7 @@ function createInstantHeroPayload(): HeroMapPayload {
     source: 'agrisense-instant-premade',
     generatedAt: new Date().toISOString(),
     metricGrid: {
-      encoded: encodeFloatGridBase64(values),
+      encoded: encodeFloatGridBase64(smoothedValues),
       width,
       height,
     },
@@ -598,8 +638,9 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
       2
     )
 
+    const isPremadeTerrain = Boolean(heightGrid && /instant-premade/i.test(heightGrid.source))
     const sourceValues = heightGrid
-      ? smoothGrid(heightGrid.values, heightGrid.width, heightGrid.height, 2)
+      ? smoothGrid(heightGrid.values, heightGrid.width, heightGrid.height, isPremadeTerrain ? 4 : 2)
       : ndviGrid
     const sourceWidth = heightGrid ? heightGrid.width : data.metricGrid.width
     const sourceHeight = heightGrid ? heightGrid.height : data.metricGrid.height
@@ -615,20 +656,21 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
     const rawDelta = Math.max(1e-6, rawRange.max - rawRange.min)
 
     const normalizedHeight = new Float32Array(resampledHeight.length)
-    const terraceSteps = heightGrid ? 84 : 68
+    const terraceSteps = isPremadeTerrain ? 128 : heightGrid ? 84 : 68
+    const terraceMix = isPremadeTerrain ? 0.9 : 0.74
     for (let i = 0; i < resampledHeight.length; i++) {
       const base = clamp((resampledHeight[i] - rawRange.min) / rawDelta, 0, 1)
-      const shaped = Math.pow(base, 1.08)
+      const shaped = Math.pow(base, isPremadeTerrain ? 1.22 : 1.08)
       const terraced = Math.round(shaped * terraceSteps) / terraceSteps
-      normalizedHeight[i] = mix(shaped, terraced, 0.74)
+      normalizedHeight[i] = mix(shaped, terraced, terraceMix)
     }
 
     const planeWidth = 162
     const planeHeight = planeWidth * aspect
     const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, sampleWidth - 1, sampleHeight - 1)
     const positions = geometry.attributes.position as THREE.BufferAttribute
-    const elevationScale = heightGrid ? 68 : 44
-    const baseY = -1.8
+    const elevationScale = isPremadeTerrain ? 30 : heightGrid ? 56 : 42
+    const baseY = isPremadeTerrain ? -4.4 : -1.8
     for (let i = 0; i < normalizedHeight.length; i++) {
       positions.setZ(i, normalizedHeight[i] * elevationScale)
     }
@@ -680,7 +722,7 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
     let lineMaterial: THREE.LineBasicMaterial | null = null
     let edgeMaterial: THREE.ShaderMaterial | null = null
     let contourMaterial: THREE.ShaderMaterial | null = null
-    let cutawayMaterial: THREE.ShaderMaterial | null = null
+    let cutawayMaterial: THREE.Material | null = null
     let baseMaterial: THREE.MeshStandardMaterial | null = null
     const skirtMeshes: THREE.Mesh[] = []
     let bottomMesh: THREE.Mesh | null = null
@@ -732,9 +774,9 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
 
         baseMaterial = new THREE.MeshStandardMaterial({
           map: outlineTexture,
-          color: new THREE.Color(0xf2f5f7),
+          color: new THREE.Color(isPremadeTerrain ? 0xecf0ea : 0xf2f5f7),
           metalness: 0.02,
-          roughness: 0.84,
+          roughness: isPremadeTerrain ? 0.9 : 0.84,
           side: THREE.DoubleSide,
         })
         terrainMesh = new THREE.Mesh(geometry, baseMaterial)
@@ -776,9 +818,10 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
         contourMaterial = new THREE.ShaderMaterial({
           uniforms: {
             uMaxHeight: { value: elevationScale },
-            uDensity: { value: 58 },
-            uThickness: { value: 0.048 },
-            uOpacity: { value: 0.72 },
+            uDensity: { value: isPremadeTerrain ? 56 : 42 },
+            uThickness: { value: isPremadeTerrain ? 0.058 : 0.044 },
+            uOpacity: { value: isPremadeTerrain ? 0.56 : 0.46 },
+            uLineColor: { value: new THREE.Color(isPremadeTerrain ? 0x1e3241 : 0x36495b) },
           },
           vertexShader: `
             varying float vHeight;
@@ -793,12 +836,13 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
             uniform float uDensity;
             uniform float uThickness;
             uniform float uOpacity;
+            uniform vec3 uLineColor;
             void main() {
               float f = fract(vHeight * uDensity);
               float d = min(f, 1.0 - f);
               float aa = fwidth(vHeight * uDensity) * 0.9;
               float line = 1.0 - smoothstep(uThickness, uThickness + aa, d);
-              gl_FragColor = vec4(vec3(0.16, 0.18, 0.21), line * uOpacity);
+              gl_FragColor = vec4(uLineColor, line * uOpacity);
             }
           `,
           transparent: true,
@@ -810,47 +854,58 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
         contourMesh.position.y = 0.22
         terrainGroup.add(contourMesh)
 
-        const wire = new THREE.WireframeGeometry(geometry)
-        lineMaterial = new THREE.LineBasicMaterial({
-          color: 0x1a2028,
-          transparent: true,
-          opacity: 0.12,
-        })
-        const line = new THREE.LineSegments(wire, lineMaterial)
-        line.rotation.x = -Math.PI / 2
-        line.position.y = 0.1
-        terrainGroup.add(line)
+        if (!isPremadeTerrain) {
+          const wire = new THREE.WireframeGeometry(geometry)
+          lineMaterial = new THREE.LineBasicMaterial({
+            color: 0x1a2028,
+            transparent: true,
+            opacity: 0.12,
+          })
+          const line = new THREE.LineSegments(wire, lineMaterial)
+          line.rotation.x = -Math.PI / 2
+          line.position.y = 0.1
+          terrainGroup.add(line)
+        }
 
-        cutawayMaterial = new THREE.ShaderMaterial({
-          uniforms: {
-            uOutlineTex: { value: outlineTexture },
-            uTopoTex: { value: topoTexture },
-            uReveal: { value: 0.001 },
-            uShade: { value: 0.88 },
-          },
-          vertexShader: `
-            varying vec2 vUv;
-            void main() {
-              vUv = uv;
-              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            }
-          `,
-          fragmentShader: `
-            uniform sampler2D uOutlineTex;
-            uniform sampler2D uTopoTex;
-            uniform float uReveal;
-            uniform float uShade;
-            varying vec2 vUv;
-            void main() {
-              float blend = smoothstep(uReveal - 0.02, uReveal + 0.02, vUv.x);
-              vec3 outlineCol = texture2D(uOutlineTex, vUv).rgb;
-              vec3 topoCol = texture2D(uTopoTex, vUv).rgb;
-              vec3 color = mix(outlineCol, topoCol, blend) * uShade;
-              gl_FragColor = vec4(color, 1.0);
-            }
-          `,
-          side: THREE.DoubleSide,
-        })
+        if (isPremadeTerrain) {
+          cutawayMaterial = new THREE.MeshStandardMaterial({
+            color: new THREE.Color(0x2f4f52),
+            roughness: 0.9,
+            metalness: 0.02,
+            side: THREE.DoubleSide,
+          })
+        } else {
+          cutawayMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+              uOutlineTex: { value: outlineTexture },
+              uTopoTex: { value: topoTexture },
+              uReveal: { value: 0.001 },
+              uShade: { value: 0.88 },
+            },
+            vertexShader: `
+              varying vec2 vUv;
+              void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+              }
+            `,
+            fragmentShader: `
+              uniform sampler2D uOutlineTex;
+              uniform sampler2D uTopoTex;
+              uniform float uReveal;
+              uniform float uShade;
+              varying vec2 vUv;
+              void main() {
+                float blend = smoothstep(uReveal - 0.02, uReveal + 0.02, vUv.x);
+                vec3 outlineCol = texture2D(uOutlineTex, vUv).rgb;
+                vec3 topoCol = texture2D(uTopoTex, vUv).rgb;
+                vec3 color = mix(outlineCol, topoCol, blend) * uShade;
+                gl_FragColor = vec4(color, 1.0);
+              }
+            `,
+            side: THREE.DoubleSide,
+          })
+        }
         for (const edge of ['north', 'south', 'west', 'east'] as const) {
           const segments = edge === 'north' || edge === 'south' ? sampleWidth - 1 : sampleHeight - 1
           const skirtGeometry = createEdgeSkirtGeometry(edge, segments, sampleHeightOnMesh, planeWidth, planeHeight, baseY)
@@ -924,7 +979,9 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
           }
 
           if (edgeMaterial) edgeMaterial.uniforms.uReveal.value = reveal
-          if (cutawayMaterial) cutawayMaterial.uniforms.uReveal.value = reveal
+          if (cutawayMaterial instanceof THREE.ShaderMaterial) {
+            cutawayMaterial.uniforms.uReveal.value = reveal
+          }
 
           const easeDock = 1 - Math.pow(1 - dockProgress, 3)
           camera.position.set(

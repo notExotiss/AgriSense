@@ -123,9 +123,52 @@ function sanitizeRequestBody(body: any) {
   }
 }
 
-function unavailableAnswer(retryAfterMs?: number) {
-  const retryText = retryAfterMs && retryAfterMs > 0 ? ` Retry in about ${Math.max(1, Math.round(retryAfterMs / 1000))}s.` : ''
-  return `Gemini is temporarily unavailable for this request.${retryText}`
+function explainLlmFailure(lastFailure?: string, retryAfterMs?: number) {
+  const retrySeconds = retryAfterMs && retryAfterMs > 0 ? Math.max(1, Math.round(retryAfterMs / 1000)) : null
+  const retryText = retrySeconds ? ` Retry in about ${retrySeconds}s.` : ''
+  const failure = String(lastFailure || '').toLowerCase()
+
+  if (failure.includes('gemini_key_leaked')) {
+    return {
+      answer: `Gemini is blocked because the configured API key was reported as leaked.${retryText}`,
+      rationale: 'Google rejected the key at the provider layer before the model could run.',
+      actions: [
+        'Create a new Gemini API key in Google AI Studio.',
+        'Set only GEMINI_API_KEY on the server and remove NEXT_PUBLIC_GEMINI_API_KEY from client env.',
+        'Restart the Next.js server after updating the key.',
+      ],
+    }
+  }
+
+  if (failure.includes('gemini_key_invalid') || failure.includes('permission_denied')) {
+    return {
+      answer: `Gemini rejected the API credentials for this request.${retryText}`,
+      rationale: 'The provider returned an authorization failure.',
+      actions: [
+        'Verify GEMINI_API_KEY is valid and active.',
+        'Confirm the key has access to Gemini generateContent.',
+        'Restart the server after any env changes.',
+      ],
+    }
+  }
+
+  if (failure.includes('gemini_http_404')) {
+    return {
+      answer: `Gemini model configuration is invalid for the current API version.${retryText}`,
+      rationale: 'The configured model name could not be resolved by the provider.',
+      actions: [
+        'Set GEMINI_MODEL to a currently available model from the Gemini ListModels endpoint.',
+        'Optionally set GEMINI_FALLBACK_MODELS to additional supported models.',
+        'Restart the server after changing environment variables.',
+      ],
+    }
+  }
+
+  return {
+    answer: `Gemini is temporarily unavailable for this request.${retryText}`,
+    rationale: 'The LLM provider did not return a usable response for this request.',
+    actions: ['Retry the same question in a moment.', 'If this persists, verify GEMINI_API_KEY and model availability.'],
+  }
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -152,7 +195,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (!chat) {
       const retryAfterMs = Number(llmUnavailable?.retryAfterMs || 0) || undefined
-      const answer = unavailableAnswer(retryAfterMs)
+      const failure = explainLlmFailure(llmUnavailable?.lastFailure || llmUnavailable?.message, retryAfterMs)
       const attemptedModels = Array.isArray(llmUnavailable?.attemptedModels) ? llmUnavailable?.attemptedModels : []
       const llmRetries = Number(llmUnavailable?.retries || 0)
       return res.status(200).json({
@@ -161,15 +204,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         retryAfterMs,
         assistantBackend: 'unavailable',
         warnings: [llmUnavailable?.lastFailure || llmUnavailable?.message || 'gemini_unavailable'],
-        answer,
+        answer: failure.answer,
         sections: {
-          rationale: 'The LLM provider did not return a usable response for this request.',
-          actions: ['Retry the same question in a moment.', 'If this persists, verify GEMINI_API_KEY and model availability.'],
+          rationale: failure.rationale,
+          actions: failure.actions,
         },
         renderModel: 'qa',
         usedHistory: false,
-        suggestion: answer,
-        output: answer,
+        suggestion: failure.answer,
+        output: failure.answer,
         model: inference.engine,
         engine: inference.engine,
         confidence: inference.confidence,
@@ -232,6 +275,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     })
   } catch (error: any) {
     const message = String(error?.message || '')
+    const fallbackFailure = explainLlmFailure(message, 8000)
     if (message.toLowerCase().includes('body exceeded')) {
       return res.status(413).json({
         error: 'request_too_large',
@@ -243,15 +287,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       unavailable: true,
       retryAfterMs: 8000,
       warnings: [message || 'gemini_unavailable'],
-      answer: unavailableAnswer(8000),
+      answer: fallbackFailure.answer,
       sections: {
-        rationale: 'The assistant backend did not produce a valid response.',
-        actions: ['Retry in a few seconds.', 'If the issue persists, verify Gemini API configuration and quota.'],
+        rationale: fallbackFailure.rationale,
+        actions: fallbackFailure.actions,
       },
       renderModel: 'qa',
       usedHistory: false,
-      suggestion: unavailableAnswer(8000),
-      output: unavailableAnswer(8000),
+      suggestion: fallbackFailure.answer,
+      output: fallbackFailure.answer,
       assistantBackend: 'unavailable',
       model: 'agrisense-ml-engine',
       engine: 'agrisense-ml-engine',

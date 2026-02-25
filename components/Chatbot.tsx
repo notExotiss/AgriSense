@@ -142,6 +142,7 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [state, setState] = useState<ChatState>('idle')
   const [assistantBackend, setAssistantBackend] = useState<'llm-gemini' | 'unavailable'>('unavailable')
+  const [backendReason, setBackendReason] = useState<string | null>(null)
   const [llmMeta, setLlmMeta] = useState<{ model: string | null; retries: number; degraded: boolean; attempted: string[] }>({
     model: null,
     retries: 0,
@@ -208,6 +209,8 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
       const backend = payload?.assistantBackend === 'llm-gemini' ? 'llm-gemini' : 'unavailable'
       const unavailable = Boolean(payload?.unavailable) || backend === 'unavailable'
       setAssistantBackend(backend)
+      const reason = Array.isArray(payload?.warnings) && payload.warnings.length > 0 ? String(payload.warnings[0]) : null
+      setBackendReason(reason)
       setLlmMeta({
         model: typeof payload?.llmFinalModel === 'string' ? payload.llmFinalModel : null,
         retries: Number(payload?.llmRetries || 0),
@@ -226,6 +229,7 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
     } catch {
       const fallback = 'Gemini could not be reached right now. Retry in a few seconds.'
       setAssistantBackend('unavailable')
+      setBackendReason('network_unreachable')
       setState('unavailable')
       setMessages((prev) => [...prev, { role: 'assistant', text: fallback }])
     }
@@ -264,6 +268,9 @@ export default function Chatbot({ context, objective = 'balanced' }: Props) {
               {llmMeta.retries > 0 ? ` | retries ${llmMeta.retries}` : ''}
               {llmMeta.degraded ? ' | degraded' : ''}
             </p>
+            {backendReason && assistantBackend !== 'llm-gemini' && (
+              <p className="mt-1 text-[11px] text-amber-300">Reason: {backendReason}</p>
+            )}
           </header>
 
           <div ref={scrollRef} className="max-h-80 space-y-3 overflow-auto bg-zinc-50 px-4 py-4 text-sm">

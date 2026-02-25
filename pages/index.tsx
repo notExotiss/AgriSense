@@ -31,10 +31,10 @@ const INTRO_RUNNING_KEY = 'agrisense_home_intro_running_v2'
 type TickerLine = { id: string; text: string }
 
 const tickerSeed: TickerLine[] = [
-  { id: 'seed-1', text: '06:02 | AOI scene refreshed with low-cloud acquisition' },
-  { id: 'seed-2', text: '06:05 | P5 stress watch opened for today' },
-  { id: 'seed-3', text: '06:08 | AI Assistant drafted targeted irrigation checklist' },
-  { id: 'seed-4', text: '06:12 | Daily re-check scheduled for 06:00 tomorrow' },
+  { id: 'seed-1', text: '06:02 | New AOI imagery processed with low cloud cover' },
+  { id: 'seed-2', text: '06:05 | Plot P5 added to today\'s watchlist' },
+  { id: 'seed-3', text: '06:08 | Assistant suggested a targeted irrigation check' },
+  { id: 'seed-4', text: '06:12 | Next automatic review set for 06:00 tomorrow' },
 ]
 
 export default function Home() {
@@ -92,11 +92,11 @@ export default function Home() {
     const clockTimer = window.setInterval(updateClock, 1000)
 
     const logMessages = [
-      '06:14 | Scenario run complete: water -9%, risk stable',
-      '06:16 | Map/grid/terrain selection synced for active AOI',
-      '06:19 | Provider diagnostics healthy on primary path',
-      '06:22 | P2 and P8 moved to scouting queue',
-      '06:25 | Forecast confidence updated after weather refresh',
+      '06:14 | Scenario complete: water use -9%, risk unchanged',
+      '06:16 | Map, grid, and terrain selection synced for this AOI',
+      '06:19 | Provider diagnostics returned healthy on the primary path',
+      '06:22 | Plots P2 and P8 moved to the scouting queue',
+      '06:25 | Forecast confidence refreshed after weather update',
       '06:27 | Alert thresholds applied to this AOI profile',
     ]
 
@@ -157,14 +157,14 @@ export default function Home() {
           <motion.article className="ops-panel rounded-[2.15rem] p-8 md:p-10" style={{ y: heroTextY }}>
             <p className="inline-flex items-center gap-2 rounded-full border border-border bg-muted/80 px-3 py-1 text-[11px] uppercase tracking-[0.15em] text-muted-foreground">
               <Workflow className="h-3.5 w-3.5" />
-              AgriSense Field Command
+              Satellite + Field Operations
             </p>
             <h1 className="mt-4 text-4xl font-bold leading-tight text-foreground md:text-5xl">
-              Field intelligence that stays grounded in the map.
+              Satellite intelligence for healthier crops and smarter irrigation.
             </h1>
             <p className="mt-4 max-w-xl text-base text-muted-foreground">
-              Lock AOI boundaries, inspect terrain-linked NDVI dynamics, and move from anomalies to decisions inside one
-              continuous workflow.
+              AgriSense combines NDVI, soil moisture, evapotranspiration, and weather into one clear field view, so you can
+              spot stress early and act by zone instead of guessing.
             </p>
 
             <div className="mt-6 flex flex-wrap items-center gap-3">
@@ -183,12 +183,12 @@ export default function Home() {
 
             <div className="mt-7 grid gap-3 sm:grid-cols-3">
               <div className="metric-tile">
-                <p className="metric-label">Current objective</p>
-                <p className="metric-value">Yield + water balance</p>
+                <p className="metric-label">Current focus</p>
+                <p className="metric-value">Early stress detection</p>
               </div>
               <div className="metric-tile">
-                <p className="metric-label">Update cadence</p>
-                <p className="metric-value">Daily check</p>
+                <p className="metric-label">Review cycle</p>
+                <p className="metric-value">Daily satellite refresh</p>
               </div>
               <div className="metric-tile">
                 <p className="metric-label">Ops clock</p>
@@ -208,7 +208,7 @@ export default function Home() {
           className="mt-5 rounded-[1.6rem] border border-border/90 bg-card/85 p-4"
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-foreground">Operations Timeline</p>
+            <p className="text-sm font-semibold text-foreground">Live Field Timeline</p>
             <span className="telemetry-chip">
               <Clock3 className="h-3.5 w-3.5 text-primary" />
               Live updates
@@ -231,34 +231,35 @@ export default function Home() {
         >
           <motion.article whileHover={{ y: -5 }} className="ops-panel rounded-[2rem] p-6 lg:col-span-5">
             <p className="metric-label">Define AOI</p>
-            <h2 className="mt-2 text-xl font-semibold text-foreground">Pin exact field boundaries</h2>
+            <h2 className="mt-2 text-xl font-semibold text-foreground">Draw the field once, monitor it continuously</h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              Search, draw, and lock the field geometry once, then carry the same AOI context across map, terrain, and chat.
+              The same boundary powers satellite fetches, terrain modeling, plot-point tracking, and saved history, so every
+              decision is based on the exact same footprint.
             </p>
             <div className="mt-4 inline-flex rounded-full border border-border bg-background/75 px-3 py-1.5 text-xs text-muted-foreground">
-              Grid and terrain stay synchronized.
+              Consistent boundary, reliable comparisons.
             </div>
           </motion.article>
 
           <motion.article whileHover={{ y: -5 }} className="ops-panel rounded-[2rem] p-6 lg:col-span-7 lg:-translate-y-4">
             <p className="metric-label">Analyze and Simulate</p>
-            <h2 className="mt-2 text-xl font-semibold text-foreground">Interpret stress with terrain context</h2>
+            <h2 className="mt-2 text-xl font-semibold text-foreground">Understand why stress is happening</h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              NDVI, ET, soil and weather are combined with topographic terrain relief so plot-level risk is visible, comparable,
-              and actionable.
+              NDVI from satellite reflectance is layered with soil moisture, ET, weather, and terrain to separate heat stress,
+              irrigation gaps, and broader field trends.
             </p>
             <div className="mt-4 grid gap-2 sm:grid-cols-3">
               <div className="metric-tile">
                 <p className="metric-label">Layer stack</p>
-                <p className="metric-value">NDVI / ET / Soil</p>
+                <p className="metric-value">NDVI, soil, ET</p>
               </div>
               <div className="metric-tile">
                 <p className="metric-label">Selection model</p>
-                <p className="metric-value">3x3 plot-linked</p>
+                <p className="metric-value">3x3 plots + zones</p>
               </div>
               <div className="metric-tile">
                 <p className="metric-label">What-if</p>
-                <p className="metric-value">Water vs risk</p>
+                <p className="metric-value">Water, risk, yield</p>
               </div>
             </div>
           </motion.article>
@@ -267,25 +268,25 @@ export default function Home() {
             <div className="grid gap-5 lg:grid-cols-[1.08fr_0.92fr]">
               <div>
                 <p className="metric-label">About AgriSense</p>
-                <h2 className="mt-2 text-2xl font-semibold text-foreground">A decision layer for modern field operations</h2>
+                <h2 className="mt-2 text-2xl font-semibold text-foreground">Built from real farm challenges</h2>
                 <p className="mt-3 text-sm text-muted-foreground">
-                  AgriSense is built to reduce guesswork between imagery intake and intervention execution. It keeps AOI mapping,
-                  terrain interpretation, plot-point diagnostics, and assistant guidance aligned so teams can act early and
-                  re-check outcomes with clear evidence.
+                  AgriSense was built to turn complex remote-sensing data into practical actions farmers can trust. Instead of
+                  raw charts and disconnected tools, it gives one workflow from field health detection to zone-level
+                  intervention planning.
                 </p>
               </div>
               <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
                 <div className="metric-tile">
                   <p className="metric-label">Core mode</p>
-                  <p className="metric-value">Question-first assistant</p>
+                  <p className="metric-value">AI agronomy assistant</p>
                 </div>
                 <div className="metric-tile">
                   <p className="metric-label">Spatial model</p>
-                  <p className="metric-value">Terrain + plot overlays</p>
+                  <p className="metric-value">Satellite + 3D terrain</p>
                 </div>
                 <div className="metric-tile">
                   <p className="metric-label">Output</p>
-                  <p className="metric-value">Actionable field steps</p>
+                  <p className="metric-value">Zone action plan</p>
                 </div>
               </div>
             </div>
@@ -295,21 +296,21 @@ export default function Home() {
                   <ScanSearch className="h-3.5 w-3.5 text-primary" />
                   Detect
                 </p>
-                <p className="mt-1 text-xs text-muted-foreground">Spot canopy stress and anomaly shifts early.</p>
+                <p className="mt-1 text-xs text-muted-foreground">Detect early crop stress from NDVI changes.</p>
               </div>
               <div className="command-log-item">
                 <p className="inline-flex items-center gap-2 text-xs font-semibold text-foreground">
                   <Layers3 className="h-3.5 w-3.5 text-primary" />
                   Contextualize
                 </p>
-                <p className="mt-1 text-xs text-muted-foreground">Tie metrics to terrain and plot boundaries.</p>
+                <p className="mt-1 text-xs text-muted-foreground">Cross-check with soil, ET, terrain, and weather.</p>
               </div>
               <div className="command-log-item">
                 <p className="inline-flex items-center gap-2 text-xs font-semibold text-foreground">
                   <Sparkles className="h-3.5 w-3.5 text-primary" />
                   Execute
                 </p>
-                <p className="mt-1 text-xs text-muted-foreground">Push targeted actions with re-check cadence.</p>
+                <p className="mt-1 text-xs text-muted-foreground">Run targeted zone actions and track outcomes.</p>
               </div>
             </div>
           </motion.article>
