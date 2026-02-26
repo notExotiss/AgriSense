@@ -2,6 +2,7 @@ import { clamp, lerp, sampleTopographyPalette, type LayerMetric } from './topogr
 
 export type MetricGridInput = {
   values: ArrayLike<number>
+  validMask?: ArrayLike<number> | null
   width: number
   height: number
   min?: number
@@ -44,7 +45,68 @@ export function resolveMetricRange(values: ArrayLike<number>, hintedMin?: number
   }
 }
 
-function sampleBilinear(values: ArrayLike<number>, width: number, height: number, x: number, y: number) {
+function quantile(sortedValues: number[], q: number) {
+  if (!sortedValues.length) return Number.NaN
+  if (sortedValues.length === 1) return sortedValues[0]
+  const position = clamp(q, 0, 1) * (sortedValues.length - 1)
+  const lower = Math.floor(position)
+  const upper = Math.ceil(position)
+  if (lower === upper) return sortedValues[lower]
+  const weight = position - lower
+  return lerp(sortedValues[lower], sortedValues[upper], weight)
+}
+
+function resolveDisplayRange(
+  values: ArrayLike<number>,
+  validMask: ArrayLike<number> | null | undefined,
+  min: number,
+  max: number
+) {
+  const sampleLimit = 8192
+  const stride = Math.max(1, Math.floor(values.length / sampleLimit))
+  const sample: number[] = []
+
+  for (let i = 0; i < values.length; i += stride) {
+    if (validMask && Number(validMask[i]) <= 0) continue
+    const value = Number(values[i])
+    if (!Number.isFinite(value)) continue
+    sample.push(value)
+  }
+
+  if (sample.length < 64) {
+    return { min, max, range: Math.max(1e-6, max - min) }
+  }
+
+  sample.sort((a, b) => a - b)
+  const q10 = quantile(sample, 0.1)
+  const q90 = quantile(sample, 0.9)
+  if (!Number.isFinite(q10) || !Number.isFinite(q90) || q90 <= q10) {
+    return { min, max, range: Math.max(1e-6, max - min) }
+  }
+
+  const baseRange = Math.max(1e-6, max - min)
+  const blendedMin = lerp(min, q10, 0.42)
+  const blendedMax = lerp(max, q90, 0.42)
+  const minRange = baseRange * 0.22
+  if (!Number.isFinite(blendedMin) || !Number.isFinite(blendedMax) || blendedMax - blendedMin < minRange) {
+    return { min, max, range: baseRange }
+  }
+
+  return {
+    min: blendedMin,
+    max: blendedMax,
+    range: Math.max(1e-6, blendedMax - blendedMin),
+  }
+}
+
+function sampleBilinear(
+  values: ArrayLike<number>,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  validMask?: ArrayLike<number> | null
+) {
   const sx = clamp(x, 0, width - 1)
   const sy = clamp(y, 0, height - 1)
   const x0 = Math.floor(sx)
@@ -59,9 +121,27 @@ function sampleBilinear(values: ArrayLike<number>, width: number, height: number
   const idx01 = y1 * width + x0
   const idx11 = y1 * width + x1
 
-  const top = lerp(Number(values[idx00] || 0), Number(values[idx10] || 0), tx)
-  const bottom = lerp(Number(values[idx01] || 0), Number(values[idx11] || 0), tx)
-  return lerp(top, bottom, ty)
+  const samples = [
+    { idx: idx00, weight: (1 - tx) * (1 - ty) },
+    { idx: idx10, weight: tx * (1 - ty) },
+    { idx: idx01, weight: (1 - tx) * ty },
+    { idx: idx11, weight: tx * ty },
+  ]
+
+  let weighted = 0
+  let weightSum = 0
+
+  for (const sample of samples) {
+    const maskOk = !validMask || Number(validMask[sample.idx]) > 0
+    if (!maskOk) continue
+    const value = Number(values[sample.idx])
+    if (!Number.isFinite(value)) continue
+    weighted += value * sample.weight
+    weightSum += sample.weight
+  }
+
+  if (weightSum <= 1e-9) return Number.NaN
+  return weighted / weightSum
 }
 
 export function renderMetricCanvas({
@@ -78,7 +158,13 @@ export function renderMetricCanvas({
     throw new Error('metric_grid_missing')
   }
 
-  const { min, max, range } = resolveMetricRange(grid.values, grid.min, grid.max)
+  const resolvedRange = resolveMetricRange(grid.values, grid.min, grid.max)
+  const { min, max, range } = resolveDisplayRange(
+    grid.values,
+    grid.validMask,
+    resolvedRange.min,
+    resolvedRange.max
+  )
   const width = Math.max(1, Math.floor(outputWidth))
   const height = Math.max(1, Math.floor(outputHeight))
   const contourLevels = 16
@@ -98,7 +184,14 @@ export function renderMetricCanvas({
       const idx = i * 4
       const sourceX = (x / Math.max(1, width - 1)) * (grid.width - 1)
       const sourceY = (y / Math.max(1, height - 1)) * (grid.height - 1)
-      const raw = sampleBilinear(grid.values, grid.width, grid.height, sourceX, sourceY)
+      const raw = sampleBilinear(grid.values, grid.width, grid.height, sourceX, sourceY, grid.validMask)
+      if (!Number.isFinite(raw)) {
+        dst[idx] = 0
+        dst[idx + 1] = 0
+        dst[idx + 2] = 0
+        dst[idx + 3] = 0
+        continue
+      }
       const normalized = clamp((raw - min) / range, 0, 1)
 
       const [rBase, gBase, bBase] = sampleTopographyPalette(metric, normalized)
@@ -134,4 +227,3 @@ export function renderMetricCanvas({
 export function canvasToBase64Png(canvas: HTMLCanvasElement) {
   return canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, '')
 }
-

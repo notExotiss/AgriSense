@@ -670,7 +670,7 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
     const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, sampleWidth - 1, sampleHeight - 1)
     const positions = geometry.attributes.position as THREE.BufferAttribute
     const elevationScale = isPremadeTerrain ? 30 : heightGrid ? 56 : 42
-    const baseY = isPremadeTerrain ? -4.4 : -1.8
+    const baseY = isPremadeTerrain ? -2.25 : -1.8
     for (let i = 0; i < normalizedHeight.length; i++) {
       positions.setZ(i, normalizedHeight[i] * elevationScale)
     }
@@ -867,45 +867,36 @@ export default function HeroTerrainSequence({ introMode = 'run', onIntroComplete
           terrainGroup.add(line)
         }
 
-        if (isPremadeTerrain) {
-          cutawayMaterial = new THREE.MeshStandardMaterial({
-            color: new THREE.Color(0x2f4f52),
-            roughness: 0.9,
-            metalness: 0.02,
-            side: THREE.DoubleSide,
-          })
-        } else {
-          cutawayMaterial = new THREE.ShaderMaterial({
-            uniforms: {
-              uOutlineTex: { value: outlineTexture },
-              uTopoTex: { value: topoTexture },
-              uReveal: { value: 0.001 },
-              uShade: { value: 0.88 },
-            },
-            vertexShader: `
-              varying vec2 vUv;
-              void main() {
-                vUv = uv;
-                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-              }
-            `,
-            fragmentShader: `
-              uniform sampler2D uOutlineTex;
-              uniform sampler2D uTopoTex;
-              uniform float uReveal;
-              uniform float uShade;
-              varying vec2 vUv;
-              void main() {
-                float blend = smoothstep(uReveal - 0.02, uReveal + 0.02, vUv.x);
-                vec3 outlineCol = texture2D(uOutlineTex, vUv).rgb;
-                vec3 topoCol = texture2D(uTopoTex, vUv).rgb;
-                vec3 color = mix(outlineCol, topoCol, blend) * uShade;
-                gl_FragColor = vec4(color, 1.0);
-              }
-            `,
-            side: THREE.DoubleSide,
-          })
-        }
+        cutawayMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            uOutlineTex: { value: outlineTexture },
+            uTopoTex: { value: topoTexture },
+            uReveal: { value: 0.001 },
+            uShade: { value: isPremadeTerrain ? 0.94 : 0.88 },
+          },
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: `
+            uniform sampler2D uOutlineTex;
+            uniform sampler2D uTopoTex;
+            uniform float uReveal;
+            uniform float uShade;
+            varying vec2 vUv;
+            void main() {
+              float blend = smoothstep(uReveal - 0.02, uReveal + 0.02, vUv.x);
+              vec3 outlineCol = texture2D(uOutlineTex, vUv).rgb;
+              vec3 topoCol = texture2D(uTopoTex, vUv).rgb;
+              vec3 color = mix(outlineCol, topoCol, blend) * uShade;
+              gl_FragColor = vec4(color, 1.0);
+            }
+          `,
+          side: THREE.DoubleSide,
+        })
         for (const edge of ['north', 'south', 'west', 'east'] as const) {
           const segments = edge === 'north' || edge === 'south' ? sampleWidth - 1 : sampleHeight - 1
           const skirtGeometry = createEdgeSkirtGeometry(edge, segments, sampleHeightOnMesh, planeWidth, planeHeight, baseY)

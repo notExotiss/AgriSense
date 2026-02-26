@@ -1,15 +1,134 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
+import { PNG } from 'pngjs'
+import type { GeoJsonPolygon, ProviderDiagnostic } from '../../lib/types/api'
+import { makeCacheKey, readMemoryCache, writeMemoryCache } from '../../lib/server/cache'
+import { runIngestPipeline, type IngestResult } from '../../lib/satellite/service'
+import { sampleTopographyPalette } from '../../lib/visual/topography'
 
-type GridResult = {
-  encoded: string
-  stats: { min: number; max: number; mean: number }
+const INGEST_CACHE_TTL_MS = 1000 * 60 * 8
+
+type SoilResponse = {
+  success: boolean
+  unavailable?: boolean
+  message?: string
+  source: string
+  isSimulated: boolean
+  cacheHit: boolean
+  warnings: string[]
+  providersTried: ProviderDiagnostic[]
+  representation?: 'hybrid-estimate'
+  baseline?: {
+    provider: string
+    variable: string
+    value: number
+    units: string
+    timestamp: string
+  }
+  proxy?: {
+    provider: string
+    metric: string
+    formula: string
+    sceneRef: IngestResult['sceneRef']
+    dataResolutionMeters: number
+  }
+  alignment?: IngestResult['alignment']
+  data?: {
+    soilMoisture: string
+    metricGrid: {
+      encoded: string
+      validMaskEncoded?: string
+      normalizationMode?: 'fixedPhysicalRange' | 'sceneAdaptiveRange'
+      width: number
+      height: number
+      min: number
+      max: number
+    }
+    overlayPng: string
+    stats: { min: number; max: number; mean: number }
+    bbox: [number, number, number, number]
+    source: string
+    isSimulated: false
+    units: 'm3/m3'
+    timestamp: string
+  } | null
 }
 
-function createSeededRandom(seed: number) {
-  let value = seed
-  return () => {
-    value = (value * 1664525 + 1013904223) % 4294967296
-    return value / 4294967296
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function round(value: number, precision = 4) {
+  const factor = Math.pow(10, precision)
+  return Math.round(value * factor) / factor
+}
+
+function decodeFloat32Grid(encoded: string, width: number, height: number) {
+  const bytes = Buffer.from(encoded, 'base64')
+  const expected = width * height
+  const floats = new Float32Array(bytes.buffer, bytes.byteOffset, Math.min(expected, Math.floor(bytes.byteLength / 4)))
+  const values = new Float32Array(expected)
+  for (let i = 0; i < expected; i++) {
+    const value = Number(floats[i])
+    values[i] = Number.isFinite(value) ? value : Number.NaN
+  }
+  return values
+}
+
+function encodeFloat32Grid(values: Float32Array) {
+  return Buffer.from(values.buffer, values.byteOffset, values.byteLength).toString('base64')
+}
+
+function decodeMaskGrid(encoded: string | undefined, width: number, height: number) {
+  if (!encoded) return null
+  const bytes = Buffer.from(encoded, 'base64')
+  const expected = width * height
+  const values = new Uint8Array(expected)
+  for (let i = 0; i < expected; i++) {
+    values[i] = i < bytes.length ? (bytes[i] > 0 ? 1 : 0) : 0
+  }
+  return values
+}
+
+function encodeMaskGrid(values: Uint8Array) {
+  return Buffer.from(values.buffer, values.byteOffset, values.byteLength).toString('base64')
+}
+
+function toPng(values: Float32Array, validMask: Uint8Array | null, width: number, height: number, min: number, max: number) {
+  const png = new PNG({ width, height })
+  const range = Math.max(1e-6, max - min)
+  for (let i = 0; i < values.length; i++) {
+    const idx = i * 4
+    const value = Number(values[i])
+    if ((validMask && !validMask[i]) || !Number.isFinite(value)) {
+      png.data[idx] = 0
+      png.data[idx + 1] = 0
+      png.data[idx + 2] = 0
+      png.data[idx + 3] = 0
+      continue
+    }
+    const normalized = clamp((values[i] - min) / range, 0, 1)
+    const [r, g, b] = sampleTopographyPalette('soil', normalized)
+    png.data[idx] = r
+    png.data[idx + 1] = g
+    png.data[idx + 2] = b
+    png.data[idx + 3] = 255
+  }
+  return PNG.sync.write(png).toString('base64')
+}
+
+function parseBody(body: any) {
+  const bbox = Array.isArray(body?.bbox) ? body.bbox.map(Number) : []
+  if (bbox.length !== 4 || bbox.some((value: number) => Number.isNaN(value))) {
+    throw new Error('bbox_required')
+  }
+  const geometry = body?.geometry && typeof body.geometry === 'object' ? (body.geometry as GeoJsonPolygon) : undefined
+  const date = typeof body?.date === 'string' ? body.date : undefined
+  const targetSize = Number.isFinite(Number(body?.targetSize)) ? Number(body.targetSize) : undefined
+  return {
+    bbox: bbox as [number, number, number, number],
+    geometry,
+    date,
+    targetSize,
   }
 }
 
@@ -25,48 +144,6 @@ async function fetchJson(url: string, timeoutMs = 15000) {
   }
 }
 
-function buildEncodedGrid(baseValue: number, bbox: [number, number, number, number], type: 'soil' | 'fallback'): GridResult {
-  const width = 256
-  const height = 256
-  const seed = Math.round((bbox[0] + bbox[1] + bbox[2] + bbox[3]) * 100000) || 12345
-  const random = createSeededRandom(Math.abs(seed))
-
-  const data: number[] = new Array(width * height)
-  let min = Number.POSITIVE_INFINITY
-  let max = Number.NEGATIVE_INFINITY
-  let sum = 0
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = y * width + x
-      const radial = Math.sin((x / width) * Math.PI) * Math.cos((y / height) * Math.PI)
-      const noise = (random() - 0.5) * (type === 'soil' ? 0.04 : 0.08)
-      const value = Math.max(0.04, Math.min(0.65, baseValue + radial * 0.03 + noise))
-      data[i] = Number(value.toFixed(4))
-      min = Math.min(min, value)
-      max = Math.max(max, value)
-      sum += value
-    }
-  }
-
-  const payload = {
-    type: 'soil_moisture',
-    width,
-    height,
-    data,
-    stats: {
-      min: Number(min.toFixed(4)),
-      max: Number(max.toFixed(4)),
-      mean: Number((sum / data.length).toFixed(4)),
-    },
-  }
-
-  return {
-    encoded: Buffer.from(JSON.stringify(payload)).toString('base64'),
-    stats: payload.stats,
-  }
-}
-
 async function getOpenMeteoSoilMoisture(lat: number, lon: number) {
   const url = new URL('https://api.open-meteo.com/v1/forecast')
   url.searchParams.set('latitude', String(lat))
@@ -78,72 +155,218 @@ async function getOpenMeteoSoilMoisture(lat: number, lon: number) {
 
   const json = await fetchJson(url.toString())
   const hourly = json?.hourly || {}
-  const top = hourly?.soil_moisture_0_to_1cm || []
-  const mid = hourly?.soil_moisture_1_to_3cm || []
-  const deep = hourly?.soil_moisture_3_to_9cm || []
-  const idx = Math.max(0, top.length - 1)
-  const valueCandidates = [top[idx], mid[idx], deep[idx]].filter((v) => typeof v === 'number')
-  if (!valueCandidates.length) throw new Error('no_soil_values')
+  const top = Array.isArray(hourly?.soil_moisture_0_to_1cm) ? hourly.soil_moisture_0_to_1cm : []
+  const mid = Array.isArray(hourly?.soil_moisture_1_to_3cm) ? hourly.soil_moisture_1_to_3cm : []
+  const deep = Array.isArray(hourly?.soil_moisture_3_to_9cm) ? hourly.soil_moisture_3_to_9cm : []
+  const idx = Math.max(0, Math.min(top.length - 1, mid.length - 1, deep.length - 1))
+  const topVal = Number(top[idx])
+  const midVal = Number(mid[idx])
+  const deepVal = Number(deep[idx])
+
   const weighted =
-    (Number(top[idx] ?? 0) * 0.5 + Number(mid[idx] ?? 0) * 0.3 + Number(deep[idx] ?? 0) * 0.2) /
-    (Number(top[idx] != null ? 0.5 : 0) + Number(mid[idx] != null ? 0.3 : 0) + Number(deep[idx] != null ? 0.2 : 0) || 1)
-  return Math.max(0.05, Math.min(0.6, weighted))
+    (Number.isFinite(topVal) ? topVal * 0.5 : 0) +
+    (Number.isFinite(midVal) ? midVal * 0.3 : 0) +
+    (Number.isFinite(deepVal) ? deepVal * 0.2 : 0)
+  const weight =
+    (Number.isFinite(topVal) ? 0.5 : 0) +
+    (Number.isFinite(midVal) ? 0.3 : 0) +
+    (Number.isFinite(deepVal) ? 0.2 : 0)
+
+  if (!Number.isFinite(weighted) || weight <= 0) throw new Error('soil_baseline_unavailable')
+  return clamp(weighted / weight, 0.02, 0.7)
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+async function getIngestSnapshot(input: {
+  bbox: [number, number, number, number]
+  geometry?: GeoJsonPolygon
+  date?: string
+  targetSize?: number
+}) {
+  const geometryKey = input.geometry ? JSON.stringify(input.geometry) : 'none'
+  const cacheKey = makeCacheKey([
+    'soil-et-ingest-v1',
+    input.bbox[0],
+    input.bbox[1],
+    input.bbox[2],
+    input.bbox[3],
+    geometryKey,
+    input.date || 'auto',
+    input.targetSize || 0,
+  ])
+
+  const cached = readMemoryCache<{ result: IngestResult; warnings: string[] }>(cacheKey)
+  if (cached?.result) return { ...cached, cacheHit: true }
+
+  const ingest = await runIngestPipeline({
+    bbox: input.bbox,
+    geometry: input.geometry,
+    date: input.date,
+    targetSize: input.targetSize,
+    policy: 'balanced',
+  })
+  writeMemoryCache(cacheKey, ingest, INGEST_CACHE_TTL_MS)
+  return { ...ingest, cacheHit: false }
+}
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse<SoilResponse | { error: string; message: string }>) {
   if (req.method !== 'POST') return res.status(405).end()
 
+  let parsed: ReturnType<typeof parseBody>
   try {
-    const { bbox } = req.body || {}
-    if (!Array.isArray(bbox) || bbox.length !== 4) {
-      return res.status(400).json({ error: 'bbox_required', message: 'Bounding box [minx,miny,maxx,maxy] is required' })
-    }
+    parsed = parseBody(req.body || {})
+  } catch {
+    return res.status(400).json({ error: 'bbox_required', message: 'Bounding box [minLon,minLat,maxLon,maxLat] is required.' })
+  }
 
-    const typedBbox = bbox.map(Number) as [number, number, number, number]
-    const centerLat = (typedBbox[1] + typedBbox[3]) / 2
-    const centerLon = (typedBbox[0] + typedBbox[2]) / 2
+  const centerLat = (parsed.bbox[1] + parsed.bbox[3]) / 2
+  const centerLon = (parsed.bbox[0] + parsed.bbox[2]) / 2
+  const providersTried: ProviderDiagnostic[] = []
+  const warnings: string[] = []
 
-    try {
-      const baseline = await getOpenMeteoSoilMoisture(centerLat, centerLon)
-      const grid = buildEncodedGrid(baseline, typedBbox, 'soil')
+  try {
+    const baselinePromise = getOpenMeteoSoilMoisture(centerLat, centerLon)
+    const ingestPromise = getIngestSnapshot(parsed)
+
+    const [baseline, ingest] = await Promise.all([baselinePromise, ingestPromise])
+
+    providersTried.push({ provider: 'open-meteo-soil', ok: true })
+    providersTried.push({ provider: ingest.result.provider, ok: true })
+
+    const ndmiGrid = ingest.result.ndmi?.metricGrid
+    if (!ndmiGrid?.encoded || !ndmiGrid.width || !ndmiGrid.height) {
       return res.status(200).json({
         success: true,
-        source: 'Open-Meteo',
+        unavailable: true,
+        message: 'NDMI proxy grid is unavailable for this AOI/date selection.',
+        source: 'strict-real-only',
         isSimulated: false,
-        cacheHit: false,
-        warnings: [],
-        providersTried: [{ provider: 'open-meteo-soil', ok: true }],
-        data: {
-          soilMoisture: grid.encoded,
-          stats: grid.stats,
-          bbox: typedBbox,
-          source: 'Open-Meteo soil moisture (AOI-derived grid)',
-          isSimulated: false,
-          units: 'm3/m3',
-          timestamp: new Date().toISOString(),
-        },
-      })
-    } catch (providerError: any) {
-      const fallback = buildEncodedGrid(0.28, typedBbox, 'fallback')
-      return res.status(200).json({
-        success: true,
-        source: 'Simulated fallback (Open-Meteo unavailable)',
-        isSimulated: true,
-        cacheHit: false,
-        warnings: [providerError?.message || 'soil_provider_failed'],
-        providersTried: [{ provider: 'open-meteo-soil', ok: false, reason: providerError?.message || 'soil_provider_failed' }],
-        data: {
-          soilMoisture: fallback.encoded,
-          stats: fallback.stats,
-          bbox: typedBbox,
-          source: 'Simulated',
-          isSimulated: true,
-          units: 'm3/m3',
-          timestamp: new Date().toISOString(),
-        },
+        cacheHit: ingest.cacheHit,
+        warnings,
+        providersTried,
+        representation: 'hybrid-estimate',
+        alignment: ingest.result.alignment,
+        data: null,
       })
     }
+
+    const ndmiValues = decodeFloat32Grid(ndmiGrid.encoded, ndmiGrid.width, ndmiGrid.height)
+    const ndmiMask = decodeMaskGrid(ndmiGrid.validMaskEncoded, ndmiGrid.width, ndmiGrid.height)
+    const ndmiMean = Number(ingest.result.ndmi?.stats?.mean ?? 0)
+
+    const moistureValues = new Float32Array(ndmiValues.length)
+    const moistureMask = new Uint8Array(ndmiValues.length)
+    let min = Number.POSITIVE_INFINITY
+    let max = Number.NEGATIVE_INFINITY
+    let sum = 0
+    let validCount = 0
+
+    for (let i = 0; i < ndmiValues.length; i++) {
+      const ndmi = Number(ndmiValues[i])
+      if ((ndmiMask && !ndmiMask[i]) || !Number.isFinite(ndmi)) {
+        moistureValues[i] = Number.NaN
+        moistureMask[i] = 0
+        continue
+      }
+      const adjusted = baseline + (ndmi - ndmiMean) * 0.22
+      const moisture = clamp(adjusted, 0.02, 0.7)
+      moistureValues[i] = moisture
+      moistureMask[i] = 1
+      min = Math.min(min, moisture)
+      max = Math.max(max, moisture)
+      sum += moisture
+      validCount += 1
+    }
+
+    if (!Number.isFinite(min) || !Number.isFinite(max) || validCount <= 0) {
+      return res.status(200).json({
+        success: true,
+        unavailable: true,
+        message: 'Soil proxy grid had no valid pixels for this AOI/date selection.',
+        source: 'strict-real-only',
+        isSimulated: false,
+        cacheHit: ingest.cacheHit,
+        warnings,
+        providersTried,
+        representation: 'hybrid-estimate',
+        alignment: ingest.result.alignment,
+        data: null,
+      })
+    }
+
+    const mean = sum / validCount
+    const encoded = encodeFloat32Grid(moistureValues)
+    const encodedMask = encodeMaskGrid(moistureMask)
+    const overlayPng = toPng(moistureValues, moistureMask, ndmiGrid.width, ndmiGrid.height, min, max)
+
+    if (Array.isArray(ingest.warnings) && ingest.warnings.length) warnings.push(...ingest.warnings)
+
+    return res.status(200).json({
+      success: true,
+      source: 'Open-Meteo + Sentinel-2 NDMI proxy',
+      isSimulated: false,
+      cacheHit: ingest.cacheHit,
+      unavailable: false,
+      warnings,
+      providersTried,
+      representation: 'hybrid-estimate',
+      baseline: {
+        provider: 'open-meteo',
+        variable: 'soil_moisture_0_to_9cm_weighted',
+        value: round(baseline),
+        units: 'm3/m3',
+        timestamp: new Date().toISOString(),
+      },
+      proxy: {
+        provider: ingest.result.provider,
+        metric: 'ndmi',
+        formula: '(B8A - B11) / (B8A + B11)',
+        sceneRef: ingest.result.sceneRef,
+        dataResolutionMeters: ingest.result.dataResolutionMeters,
+      },
+      alignment: ingest.result.alignment,
+      data: {
+        soilMoisture: encoded,
+        metricGrid: {
+          encoded,
+          validMaskEncoded: encodedMask,
+          normalizationMode: 'fixedPhysicalRange',
+          width: ndmiGrid.width,
+          height: ndmiGrid.height,
+          min: round(min),
+          max: round(max),
+        },
+        overlayPng,
+        stats: {
+          min: round(min),
+          max: round(max),
+          mean: round(mean),
+        },
+        bbox: ingest.result.bbox,
+        source: 'Hybrid estimate (Open-Meteo baseline + NDMI proxy)',
+        isSimulated: false,
+        units: 'm3/m3',
+        timestamp: new Date().toISOString(),
+      },
+    })
   } catch (error: any) {
-    return res.status(500).json({ error: 'soil_fetch_failed', message: String(error?.message || error) })
+    const message = String(error?.message || 'soil_fetch_failed')
+    if (message.startsWith('http_')) {
+      providersTried.push({ provider: 'open-meteo-soil', ok: false, reason: message })
+    }
+    if (!providersTried.some((provider) => provider.provider === 'hybrid-soil-proxy')) {
+      providersTried.push({ provider: 'hybrid-soil-proxy', ok: false, reason: message })
+    }
+    return res.status(200).json({
+      success: true,
+      unavailable: true,
+      message: 'Soil layer unavailable under strict real-only mode.',
+      source: 'strict-real-only',
+      isSimulated: false,
+      cacheHit: false,
+      warnings: [message],
+      providersTried,
+      representation: 'hybrid-estimate',
+      data: null,
+    })
   }
 }

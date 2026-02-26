@@ -1,5 +1,21 @@
 export type BBox = [number, number, number, number]
 
+export type RasterAlignment = {
+  bbox: BBox
+  crs: 'EPSG:4326'
+  width: number
+  height: number
+  pixelSizeLon: number
+  pixelSizeLat: number
+  pixelSizeMetersApprox: number
+}
+
+export type SceneRef = {
+  provider: string
+  sceneId: string
+  sceneDate: string | null
+}
+
 export type ApiErrorCode =
   | 'bbox_required'
   | 'auth_required'
@@ -35,10 +51,63 @@ export type DataMeta = {
 }
 
 export type TerrainQuality = 'high' | 'balanced' | 'light'
+export type TerrainVerticalScaleMode = 'true' | 'reliefAssist'
+export type TerrainModelType = 'DTM' | 'DSM'
+export type TerrainPrecisionClass = 'high' | 'medium' | 'low'
 
 export type TerrainMeshMeta = {
   smoothed: boolean
   resolution: number
+}
+
+export type TerrainZStats = {
+  zMin: number
+  zMax: number
+  zP05: number
+  zP95: number
+}
+
+export type TerrainFetchResponse = {
+  success: boolean
+  degraded?: boolean
+  reason?: string
+  source?: string
+  demSource?: string
+  demDataset?: string
+  modelType?: TerrainModelType
+  verticalDatum?: string
+  sourceResolutionMeters?: number
+  effectiveResolutionMeters?: number
+  precisionClass?: TerrainPrecisionClass
+  voidFillRatio?: number
+  zStats?: TerrainZStats
+  providerResolutionMeters?: number
+  pixelSizeMeters?: number
+  coverage?: number
+  meshMeta?: TerrainMeshMeta
+  warnings: string[]
+  providersTried: ProviderDiagnostic[]
+  data: {
+    demGrid: number[]
+    width: number
+    height: number
+    bbox: BBox
+    source: string
+    isSimulated: boolean
+    texturePng?: string | null
+    providerResolutionMeters?: number
+    pixelSizeMeters?: number
+    coverage?: number
+    demSource?: string
+    demDataset?: string
+    modelType?: TerrainModelType
+    verticalDatum?: string
+    sourceResolutionMeters?: number
+    effectiveResolutionMeters?: number
+    precisionClass?: TerrainPrecisionClass
+    voidFillRatio?: number
+    zStats?: TerrainZStats
+  }
 }
 
 export type HeroLegend = {
@@ -102,6 +171,14 @@ export type GridCellSummary = {
   max: number
   validPixelRatio: number
   stressLevel: 'high' | 'moderate' | 'low' | 'unknown'
+}
+
+export type CellFootprint = {
+  cellId: string
+  row: number
+  col: number
+  polygon: GeoJsonPolygon | null
+  coverage: number
 }
 
 export type GeocodePlace = {

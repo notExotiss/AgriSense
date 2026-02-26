@@ -38,3 +38,21 @@ export function writeMemoryCache<T>(key: string, value: T, ttlMs: number) {
   store.set(key, { value, expiresAt: Date.now() + ttlMs })
 }
 
+export function clearMemoryCache(prefix?: string) {
+  const store = getCacheStore()
+  if (!prefix) {
+    const cleared = store.size
+    store.clear()
+    return cleared
+  }
+
+  let cleared = 0
+  const keysToDelete: string[] = []
+  store.forEach((_, key) => {
+    if (key.startsWith(prefix)) keysToDelete.push(key)
+  })
+  keysToDelete.forEach((key) => {
+    if (store.delete(key)) cleared += 1
+  })
+  return cleared
+}

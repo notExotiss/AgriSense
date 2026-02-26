@@ -1,15 +1,28 @@
-import { PNG } from 'pngjs'
 import { fromArrayBuffer } from 'geotiff'
-import type { GridCellSummary } from '../types/api'
+import { PNG } from 'pngjs'
+import type { CellFootprint, GeoJsonPolygon, GridCellSummary, RasterAlignment, SceneRef } from '../types/api'
+import { buildAoiMask, clipPolygonToRect, deriveAlignment, normalizePolygon } from '../server/raster-geometry'
+import { sampleTopographyPalette } from '../visual/topography'
 
 export type IngestPolicy = 'balanced' | 'lowest-cloud' | 'most-recent'
 export type IngestProvider = 'planetary-computer-preview' | 'sentinel-hub-cdse'
 
 export type IngestRequest = {
   bbox: [number, number, number, number]
+  geometry?: GeoJsonPolygon | null
   date?: string
-  targetSize?: 256 | 512 | 1024
+  targetSize?: number
   policy?: IngestPolicy
+}
+
+type EncodedGrid = {
+  encoded: string
+  validMaskEncoded?: string
+  normalizationMode?: 'fixedPhysicalRange' | 'sceneAdaptiveRange'
+  width: number
+  height: number
+  min: number
+  max: number
 }
 
 export type IngestResult = {
@@ -22,17 +35,14 @@ export type IngestResult = {
     platform: string | null
   }
   bbox: [number, number, number, number]
+  alignment: RasterAlignment
+  sceneRef: SceneRef
+  dataResolutionMeters: number
   ndvi: {
     previewPng: string
     width: number
     height: number
-    metricGrid?: {
-      encoded: string
-      width: number
-      height: number
-      min: number
-      max: number
-    }
+    metricGrid?: EncodedGrid
     stats: {
       min: number
       max: number
@@ -41,7 +51,22 @@ export type IngestResult = {
       p90: number
     }
     validPixelRatio: number
+    aoiMaskMeta: {
+      applied: boolean
+      coveredPixelRatio: number
+    }
     grid3x3: GridCellSummary[]
+    cellFootprints: CellFootprint[]
+  }
+  ndmi?: {
+    metricGrid?: EncodedGrid
+    stats: {
+      min: number
+      max: number
+      mean: number
+      p10: number
+      p90: number
+    }
   }
 }
 
@@ -51,8 +76,31 @@ type ProviderFailure = {
   message: string
 }
 
+type NormalizedIngestRequest = {
+  bbox: [number, number, number, number]
+  geometry: GeoJsonPolygon | null
+  date: string
+  targetSize: number
+  policy: IngestPolicy
+}
+
+type DateRange = {
+  fromDate: Date
+  toDate: Date
+  datetime: string
+}
+
+type StatsResult = {
+  min: number
+  max: number
+  mean: number
+  p10: number
+  p90: number
+  validPixelRatio: number
+}
+
 const PLANETARY_STAC_SEARCH_URL = 'https://planetarycomputer.microsoft.com/api/stac/v1/search'
-const PLANETARY_PREVIEW_URL = 'https://planetarycomputer.microsoft.com/api/data/v1/item/preview.png'
+const PLANETARY_PREVIEW_URL = 'https://planetarycomputer.microsoft.com/api/data/v1/item/preview.tif'
 
 const TOKEN_URL_CLASSIC = 'https://services.sentinel-hub.com/oauth/token'
 const PROCESS_URL_CLASSIC = 'https://services.sentinel-hub.com/api/v1/process'
@@ -60,36 +108,21 @@ const TOKEN_URL_CDSE = 'https://identity.dataspace.copernicus.eu/auth/realms/CDS
 const PROCESS_URL_CDSE = 'https://sh.dataspace.copernicus.eu/api/v1/process'
 
 const DEFAULT_SIZE = 512
+const MIN_SIZE = 128
+const MAX_SIZE = 1024
 const DEFAULT_POLICY: IngestPolicy = 'balanced'
 const DEFAULT_LOOKBACK_DAYS = 45
 const FETCH_TIMEOUT_MS = 25000
 
-const evalscriptNDVI = `//VERSION=3
+const evalscriptReflectanceCube = `//VERSION=3
 function setup(){
   return {
-    input: [{ bands:["B04","B08"], units: "REFLECTANCE" }],
-    output: { bands: 1, sampleType: "FLOAT32" }
+    input: [{ bands:["B04","B08","B8A","B11"], units: "REFLECTANCE" }],
+    output: { bands: 4, sampleType: "FLOAT32" }
   }
 }
 function evaluatePixel(s){
-  let ndvi = (s.B08 - s.B04) / (s.B08 + s.B04)
-  if (!isFinite(ndvi)) ndvi = 0
-  return [ndvi]
-}`
-
-const evalscriptColorPNG = `//VERSION=3
-function setup(){
-  return { input:[{ bands:["B04","B08"], units: "REFLECTANCE" }], output: { bands: 3 } }
-}
-function evaluatePixel(s){
-  let v = (s.B08 - s.B04) / (s.B08 + s.B04)
-  if (!isFinite(v)) v = 0
-  let r,g,b
-  if (v < 0){ r=128; g=0; b=38 }
-  else if (v < 0.2){ r=255; g=255; b=178 }
-  else if (v < 0.4){ r=127; g=201; b=127 }
-  else { r=27; g=120; b=55 }
-  return [r/255, g/255, b/255]
+  return [s.B04, s.B08, s.B8A, s.B11]
 }`
 
 class IngestPipelineError extends Error {
@@ -121,7 +154,7 @@ function round(value: number, precision = 6) {
   return Math.round(value * factor) / factor
 }
 
-function toDateRange(input?: string) {
+function toDateRange(input?: string): DateRange {
   if (input && input.includes('/')) {
     const [from, to] = input.split('/')
     const fromDate = new Date(from)
@@ -140,31 +173,51 @@ function toDateRange(input?: string) {
   }
 }
 
-function normalizeRequest(input: IngestRequest): Required<IngestRequest> {
-  const bbox = (input.bbox || []).map(Number) as [number, number, number, number]
+function estimateAoiSpanMeters(bbox: [number, number, number, number]) {
+  const lonSpan = Math.abs(bbox[2] - bbox[0])
+  const latSpan = Math.abs(bbox[3] - bbox[1])
+  const latMid = ((bbox[1] + bbox[3]) / 2) * (Math.PI / 180)
+  const metersPerDegLat = 111320
+  const metersPerDegLon = Math.max(1, Math.cos(latMid) * 111320)
+  const x = lonSpan * metersPerDegLon
+  const y = latSpan * metersPerDegLat
+  return Math.max(x, y)
+}
+
+function adaptiveTargetSize(bbox: [number, number, number, number], requested?: number) {
+  if (Number.isFinite(requested)) {
+    return clamp(Math.round(Number(requested)), MIN_SIZE, MAX_SIZE)
+  }
+  const spanMeters = estimateAoiSpanMeters(bbox)
+  if (spanMeters <= 450) return 1024
+  if (spanMeters <= 1800) return 768
+  return DEFAULT_SIZE
+}
+
+function normalizeRequest(input: IngestRequest): NormalizedIngestRequest {
+  const bbox = (Array.isArray(input?.bbox) ? input.bbox : []).map(Number) as [number, number, number, number]
   if (!Array.isArray(bbox) || bbox.length !== 4 || bbox.some((n) => Number.isNaN(n))) {
     throw new Error('bbox_required')
   }
+  if (!(bbox[2] > bbox[0]) || !(bbox[3] > bbox[1])) {
+    throw new Error('bbox_required')
+  }
 
-  const targetSize = input.targetSize && [256, 512, 1024].includes(input.targetSize) ? input.targetSize : DEFAULT_SIZE
-  const policy = input.policy || DEFAULT_POLICY
-  const { datetime } = toDateRange(input.date)
+  const geometry = input?.geometry ? normalizePolygon(input.geometry) : null
+  if (input?.geometry && !geometry) {
+    throw new Error('invalid_geometry')
+  }
 
   return {
     bbox,
-    date: datetime,
-    policy,
-    targetSize,
+    geometry,
+    date: toDateRange(input?.date).datetime,
+    targetSize: adaptiveTargetSize(bbox, input?.targetSize),
+    policy: input?.policy || DEFAULT_POLICY,
   }
 }
 
-function scoreScene(
-  item: any,
-  policy: IngestPolicy,
-  now: Date,
-  rangeFrom: Date,
-  rangeTo: Date
-) {
+function scoreScene(item: any, policy: IngestPolicy, now: Date, rangeFrom: Date, rangeTo: Date) {
   const sceneDate = item?.properties?.datetime ? new Date(item.properties.datetime) : null
   const cloud = typeof item?.properties?.['eo:cloud_cover'] === 'number' ? item.properties['eo:cloud_cover'] : 100
   const daysOld = sceneDate ? (now.getTime() - sceneDate.getTime()) / (1000 * 60 * 60 * 24) : 365
@@ -172,28 +225,25 @@ function scoreScene(
   const recencyScore = clamp(1 - daysOld / 90, 0, 1)
   const cloudScore = clamp(1 - cloud / 100, 0, 1)
 
-  if (policy === 'lowest-cloud') return cloudScore * 0.8 + recencyScore * 0.2
-  if (policy === 'most-recent') return recencyScore * 0.85 + cloudScore * 0.15
+  if (policy === 'lowest-cloud') return cloudScore * 0.82 + recencyScore * 0.18
+  if (policy === 'most-recent') return recencyScore * 0.86 + cloudScore * 0.14
 
   const inWindowBoost = sceneDate && sceneDate >= rangeFrom && sceneDate <= rangeTo ? 0.1 : 0
-  return recencyScore * 0.6 + cloudScore * 0.4 + inWindowBoost
+  return recencyScore * 0.58 + cloudScore * 0.42 + inWindowBoost
 }
 
-function pickBestScene(items: any[], policy: IngestPolicy, dateRange: { fromDate: Date; toDate: Date }) {
+function pickBestScene(items: any[], policy: IngestPolicy, dateRange: DateRange) {
   const now = new Date()
   return [...items]
-    .filter((item) => item?.id && item?.assets?.B04?.href && item?.assets?.B08?.href)
-    .map((item) => ({
-      item,
-      score: scoreScene(item, policy, now, dateRange.fromDate, dateRange.toDate),
-    }))
+    .filter((item) => item?.id && item?.assets?.B04?.href && item?.assets?.B08?.href && item?.assets?.B8A?.href && item?.assets?.B11?.href)
+    .map((item) => ({ item, score: scoreScene(item, policy, now, dateRange.fromDate, dateRange.toDate) }))
     .sort((a, b) => b.score - a.score)[0]?.item
 }
 
 function buildBandPreviewUrl(params: {
   itemId: string
   bbox: [number, number, number, number]
-  band: 'B04' | 'B08'
+  band: 'B04' | 'B08' | 'B8A' | 'B11'
   width: number
   height: number
 }) {
@@ -203,12 +253,94 @@ function buildBandPreviewUrl(params: {
   url.searchParams.set('assets', params.band)
   url.searchParams.set('asset_bidx', `${params.band}|1`)
   url.searchParams.set('nodata', '0')
-  url.searchParams.set('format', 'png')
-  url.searchParams.set('rescale', '0,3000')
   url.searchParams.set('bbox', params.bbox.join(','))
   url.searchParams.set('width', String(params.width))
   url.searchParams.set('height', String(params.height))
   return url.toString()
+}
+
+async function decodeSingleBandTiff(buffer: Buffer) {
+  const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer
+  const tiff = await fromArrayBuffer(arrayBuffer)
+  const image = await tiff.getImage()
+  const width = Number(image.getWidth())
+  const height = Number(image.getHeight())
+  const rasters = (await image.readRasters({ interleave: true })) as Float32Array | Uint16Array | Int16Array | Float64Array
+  const values = new Float32Array(width * height)
+  for (let i = 0; i < values.length; i++) {
+    const raw = Number((rasters as any)[i])
+    if (!Number.isFinite(raw)) {
+      values[i] = 0
+      continue
+    }
+    const reflectance = raw > 2 ? raw / 10000 : raw
+    values[i] = reflectance > 0 ? reflectance : 0
+  }
+  return { values, width, height }
+}
+
+async function decodeReflectanceCubeTiff(buffer: Buffer) {
+  const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer
+  const tiff = await fromArrayBuffer(arrayBuffer)
+  const image = await tiff.getImage()
+  const width = Number(image.getWidth())
+  const height = Number(image.getHeight())
+  const sampleCount = Number(image.getSamplesPerPixel() || 1)
+  if (sampleCount < 4) throw new Error('reflectance_cube_missing_bands')
+  const rasters = (await image.readRasters({ interleave: true })) as Float32Array | Float64Array
+  const expected = width * height
+  const b04 = new Float32Array(expected)
+  const b08 = new Float32Array(expected)
+  const b8a = new Float32Array(expected)
+  const b11 = new Float32Array(expected)
+
+  for (let i = 0; i < expected; i++) {
+    const offset = i * sampleCount
+    const v04 = Number((rasters as any)[offset])
+    const v08 = Number((rasters as any)[offset + 1])
+    const v8a = Number((rasters as any)[offset + 2])
+    const v11 = Number((rasters as any)[offset + 3])
+
+    const n04 = Number.isFinite(v04) ? (v04 > 2 ? v04 / 10000 : v04) : 0
+    const n08 = Number.isFinite(v08) ? (v08 > 2 ? v08 / 10000 : v08) : 0
+    const n8a = Number.isFinite(v8a) ? (v8a > 2 ? v8a / 10000 : v8a) : 0
+    const n11 = Number.isFinite(v11) ? (v11 > 2 ? v11 / 10000 : v11) : 0
+
+    b04[i] = n04 > 0 ? n04 : 0
+    b08[i] = n08 > 0 ? n08 : 0
+    b8a[i] = n8a > 0 ? n8a : 0
+    b11[i] = n11 > 0 ? n11 : 0
+  }
+
+  return { b04, b08, b8a, b11, width, height }
+}
+
+function computeIndexGrid(numerator: Float32Array, denominator: Float32Array, minSignal = 0.005) {
+  const length = Math.min(numerator.length, denominator.length)
+  const values = new Float32Array(length)
+  const validMask = new Uint8Array(length)
+  for (let i = 0; i < length; i++) {
+    const num = Number(numerator[i])
+    const den = Number(denominator[i])
+    const sum = num + den
+    if (
+      !Number.isFinite(num) ||
+      !Number.isFinite(den) ||
+      num <= 0 ||
+      den <= 0 ||
+      num > 1.5 ||
+      den > 1.5 ||
+      sum <= minSignal
+    ) {
+      values[i] = Number.NaN
+      validMask[i] = 0
+      continue
+    }
+    const value = clamp((num - den) / sum, -1, 1)
+    values[i] = value
+    validMask[i] = 1
+  }
+  return { values, validMask }
 }
 
 function quantile(sortedValues: number[], q: number) {
@@ -222,62 +354,39 @@ function quantile(sortedValues: number[], q: number) {
   return sortedValues[lower] * (1 - fraction) + sortedValues[upper] * fraction
 }
 
-function computeNdviFromPngBuffers(redBuffer: Buffer, nirBuffer: Buffer) {
-  const red = PNG.sync.read(redBuffer)
-  const nir = PNG.sync.read(nirBuffer)
-
-  if (red.width !== nir.width || red.height !== nir.height) {
-    throw new Error('band_dimension_mismatch')
-  }
-
-  const width = red.width
-  const height = red.height
-  const pixelCount = width * height
-  const ndviValues = new Float32Array(pixelCount)
-  const validMask = new Uint8Array(pixelCount)
-
+function computeStats(values: Float32Array, validMask: Uint8Array, aoiMask: Uint8Array | null): StatsResult {
+  const validValues: number[] = []
   let min = Number.POSITIVE_INFINITY
   let max = Number.NEGATIVE_INFINITY
   let sum = 0
-  let validCount = 0
-  const validValues: number[] = []
+  let valid = 0
+  let eligible = 0
 
-  for (let i = 0; i < pixelCount; i++) {
-    const idx = i * 4
-    const r = red.data[idx]
-    const n = nir.data[idx]
-    const den = n + r
-    let ndvi = 0
-    if (den > 0) {
-      ndvi = clamp((n - r) / den, -1, 1)
-      validMask[i] = 1
-      validCount += 1
-      validValues.push(ndvi)
-      min = Math.min(min, ndvi)
-      max = Math.max(max, ndvi)
-      sum += ndvi
-    }
-    ndviValues[i] = ndvi
+  for (let i = 0; i < values.length; i++) {
+    if (aoiMask && !aoiMask[i]) continue
+    eligible += 1
+    if (!validMask[i]) continue
+    const value = Number(values[i])
+    if (!Number.isFinite(value)) continue
+    valid += 1
+    validValues.push(value)
+    min = Math.min(min, value)
+    max = Math.max(max, value)
+    sum += value
   }
 
   validValues.sort((a, b) => a - b)
-  const mean = validCount ? sum / validCount : 0
-  const p10 = validCount ? quantile(validValues, 0.1) : 0
-  const p90 = validCount ? quantile(validValues, 0.9) : 0
+  const mean = valid ? sum / valid : 0
+  const p10 = valid ? quantile(validValues, 0.1) : 0
+  const p90 = valid ? quantile(validValues, 0.9) : 0
 
   return {
-    ndviValues,
-    width,
-    height,
-    stats: {
-      min: round(validCount ? min : 0),
-      max: round(validCount ? max : 0),
-      mean: round(mean),
-      p10: round(p10),
-      p90: round(p90),
-    },
-    validPixelRatio: round(validCount / Math.max(1, pixelCount), 4),
-    validMask,
+    min: round(valid ? min : 0, 4),
+    max: round(valid ? max : 0, 4),
+    mean: round(mean, 4),
+    p10: round(p10, 4),
+    p90: round(p90, 4),
+    validPixelRatio: round(valid / Math.max(1, eligible), 4),
   }
 }
 
@@ -288,13 +397,9 @@ function classifyStress(mean: number, validPixelRatio: number): GridCellSummary[
   return 'low'
 }
 
-function computeGrid3x3(
-  ndviValues: Float32Array,
-  width: number,
-  height: number,
-  validMask?: Uint8Array
-) {
+function computeGrid3x3(values: Float32Array, validMask: Uint8Array, width: number, height: number, aoiMask: Uint8Array | null) {
   const cells: GridCellSummary[] = []
+
   for (let row = 0; row < 3; row++) {
     for (let col = 0; col < 3; col++) {
       const x0 = Math.floor((col / 3) * width)
@@ -305,92 +410,90 @@ function computeGrid3x3(
       let min = Number.POSITIVE_INFINITY
       let max = Number.NEGATIVE_INFINITY
       let sum = 0
-      let count = 0
       let valid = 0
-      const total = Math.max(1, (x1 - x0) * (y1 - y0))
+      let eligible = 0
 
       for (let y = y0; y < y1; y++) {
         for (let x = x0; x < x1; x++) {
           const idx = y * width + x
-          const value = Number(ndviValues[idx])
+          if (aoiMask && !aoiMask[idx]) continue
+          eligible += 1
+          if (!validMask[idx]) continue
+          const value = Number(values[idx])
           if (!Number.isFinite(value)) continue
-          count += 1
+          valid += 1
           min = Math.min(min, value)
           max = Math.max(max, value)
           sum += value
-          if (validMask?.[idx]) valid += 1
         }
       }
 
-      const mean = count ? sum / count : 0
-      const validPixelRatio = validMask ? valid / total : count / total
+      const mean = valid ? sum / valid : 0
+      const validPixelRatio = valid / Math.max(1, eligible)
       cells.push({
         cellId: `${row}-${col}`,
         row,
         col,
         mean: round(mean, 4),
-        min: round(count ? min : 0, 4),
-        max: round(count ? max : 0, 4),
+        min: round(valid ? min : 0, 4),
+        max: round(valid ? max : 0, 4),
         validPixelRatio: round(validPixelRatio, 4),
         stressLevel: classifyStress(mean, validPixelRatio),
       })
     }
   }
+
   return cells
 }
 
-function downsampleNdviGrid(
-  ndviValues: Float32Array,
-  width: number,
-  height: number,
-  targetSize = 128
-) {
+function downsampleGrid(values: Float32Array, validMask: Uint8Array, width: number, height: number, targetSize: number) {
   const outputWidth = Math.max(1, Math.min(targetSize, width))
   const outputHeight = Math.max(1, Math.min(targetSize, height))
-  const values = new Float32Array(outputWidth * outputHeight)
-
-  let min = Number.POSITIVE_INFINITY
-  let max = Number.NEGATIVE_INFINITY
-
-  for (let outY = 0; outY < outputHeight; outY++) {
-    const y0 = Math.floor((outY / outputHeight) * height)
-    const y1 = Math.min(height, Math.ceil(((outY + 1) / outputHeight) * height))
-
-    for (let outX = 0; outX < outputWidth; outX++) {
-      const x0 = Math.floor((outX / outputWidth) * width)
-      const x1 = Math.min(width, Math.ceil(((outX + 1) / outputWidth) * width))
-
-      let sum = 0
-      let count = 0
-      for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-          const idx = y * width + x
-          const value = ndviValues[idx]
-          if (!Number.isFinite(value)) continue
-          sum += value
-          count += 1
-        }
-      }
-
-      const sampled = count ? sum / count : 0
-      const outputIndex = outY * outputWidth + outX
-      values[outputIndex] = sampled
-      min = Math.min(min, sampled)
-      max = Math.max(max, sampled)
+  if (outputWidth === width && outputHeight === height) {
+    return {
+      values,
+      validMask,
+      width,
+      height,
     }
   }
 
-  if (!Number.isFinite(min) || !Number.isFinite(max)) {
-    min = 0
-    max = 0
+  const nextValues = new Float32Array(outputWidth * outputHeight)
+  const nextValid = new Uint8Array(outputWidth * outputHeight)
+  for (let outY = 0; outY < outputHeight; outY++) {
+    const y0 = Math.floor((outY / outputHeight) * height)
+    const y1 = Math.min(height, Math.ceil(((outY + 1) / outputHeight) * height))
+    for (let outX = 0; outX < outputWidth; outX++) {
+      const x0 = Math.floor((outX / outputWidth) * width)
+      const x1 = Math.min(width, Math.ceil(((outX + 1) / outputWidth) * width))
+      let sum = 0
+      let validCount = 0
+      const totalCount = Math.max(1, (y1 - y0) * (x1 - x0))
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const idx = y * width + x
+          if (!validMask[idx]) continue
+          sum += values[idx]
+          validCount += 1
+        }
+      }
+      const outIdx = outY * outputWidth + outX
+      const validFraction = validCount / totalCount
+      if (validCount > 0 && validFraction >= 0.5) {
+        nextValues[outIdx] = sum / validCount
+        nextValid[outIdx] = 1
+      } else {
+        nextValues[outIdx] = Number.NaN
+        nextValid[outIdx] = 0
+      }
+    }
   }
 
   return {
-    values,
+    values: nextValues,
+    validMask: nextValid,
     width: outputWidth,
     height: outputHeight,
-    min,
-    max,
   }
 }
 
@@ -399,22 +502,24 @@ function encodeFloat32Grid(values: Float32Array) {
   return buffer.toString('base64')
 }
 
-function ndviToColor(ndvi: number): [number, number, number] {
-  const value = clamp(ndvi, -1, 1)
-  if (value < -0.1) return [42, 69, 135]
-  if (value < 0) return [121, 164, 207]
-  if (value < 0.2) return [231, 204, 126]
-  if (value < 0.4) return [170, 196, 106]
-  if (value < 0.6) return [90, 161, 83]
-  if (value < 0.8) return [46, 120, 64]
-  return [22, 86, 53]
+function encodeMaskGrid(mask: Uint8Array) {
+  return Buffer.from(mask.buffer, mask.byteOffset, mask.byteLength).toString('base64')
 }
 
-function renderNdviPngBase64(ndviValues: Float32Array, width: number, height: number) {
+function renderMetricPreviewPng(values: Float32Array, validMask: Uint8Array, width: number, height: number, min: number, max: number) {
   const png = new PNG({ width, height })
-  for (let i = 0; i < ndviValues.length; i++) {
-    const [r, g, b] = ndviToColor(ndviValues[i])
+  const range = Math.max(1e-6, max - min)
+  for (let i = 0; i < values.length; i++) {
     const idx = i * 4
+    if (!validMask[i]) {
+      png.data[idx] = 0
+      png.data[idx + 1] = 0
+      png.data[idx + 2] = 0
+      png.data[idx + 3] = 0
+      continue
+    }
+    const normalized = clamp((values[i] - min) / range, 0, 1)
+    const [r, g, b] = sampleTopographyPalette('ndvi', normalized)
     png.data[idx] = r
     png.data[idx + 1] = g
     png.data[idx + 2] = b
@@ -423,9 +528,217 @@ function renderNdviPngBase64(ndviValues: Float32Array, width: number, height: nu
   return PNG.sync.write(png).toString('base64')
 }
 
-async function runPlanetaryComputerProvider(input: Required<IngestRequest>): Promise<IngestResult> {
-  const dateRange = toDateRange(input.date)
+function buildRectPolygon(minLon: number, minLat: number, maxLon: number, maxLat: number): GeoJsonPolygon {
+  return {
+    type: 'Polygon',
+    coordinates: [[
+      [minLon, minLat],
+      [maxLon, minLat],
+      [maxLon, maxLat],
+      [minLon, maxLat],
+      [minLon, minLat],
+    ]],
+  }
+}
 
+function buildCellFootprints(
+  bbox: [number, number, number, number],
+  width: number,
+  height: number,
+  geometry: GeoJsonPolygon | null,
+  aoiMask: Uint8Array | null
+) {
+  const footprints: CellFootprint[] = []
+  const ring = geometry?.coordinates?.[0] as [number, number][] | undefined
+
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      const x0 = Math.floor((col / 3) * width)
+      const x1 = Math.floor(((col + 1) / 3) * width)
+      const y0 = Math.floor((row / 3) * height)
+      const y1 = Math.floor(((row + 1) / 3) * height)
+
+      const minLon = bbox[0] + ((bbox[2] - bbox[0]) * col) / 3
+      const maxLon = bbox[0] + ((bbox[2] - bbox[0]) * (col + 1)) / 3
+      const maxLat = bbox[3] - ((bbox[3] - bbox[1]) * row) / 3
+      const minLat = bbox[3] - ((bbox[3] - bbox[1]) * (row + 1)) / 3
+
+      const cellPixels = Math.max(1, (x1 - x0) * (y1 - y0))
+      let covered = 0
+      if (aoiMask) {
+        for (let y = y0; y < y1; y++) {
+          for (let x = x0; x < x1; x++) {
+            const idx = y * width + x
+            if (aoiMask[idx]) covered += 1
+          }
+        }
+      } else {
+        covered = cellPixels
+      }
+
+      let polygon: GeoJsonPolygon | null
+      if (ring && ring.length >= 4) {
+        const clipped = clipPolygonToRect(ring, { minLon, minLat, maxLon, maxLat })
+        polygon = clipped.length >= 4 ? { type: 'Polygon', coordinates: [clipped as [number, number][]] } : null
+      } else {
+        polygon = buildRectPolygon(minLon, minLat, maxLon, maxLat)
+      }
+
+      footprints.push({
+        cellId: `${row}-${col}`,
+        row,
+        col,
+        polygon,
+        coverage: round(covered / cellPixels, 4),
+      })
+    }
+  }
+
+  return footprints
+}
+
+function providerFailure(provider: string, error: unknown): ProviderFailure {
+  const message = error instanceof Error ? error.message : 'unknown_error'
+  return {
+    provider,
+    code: message,
+    message,
+  }
+}
+
+async function fetchPlanetaryBand(input: NormalizedIngestRequest, sceneId: string, band: 'B04' | 'B08' | 'B8A' | 'B11') {
+  const url = buildBandPreviewUrl({
+    itemId: sceneId,
+    bbox: input.bbox,
+    band,
+    width: input.targetSize,
+    height: input.targetSize,
+  })
+  const response = await fetchWithTimeout(url, {}, FETCH_TIMEOUT_MS)
+  if (!response.ok) throw new Error(`planetary_band_${band}_failed_${response.status}`)
+  const buffer = Buffer.from(await response.arrayBuffer())
+  return decodeSingleBandTiff(buffer)
+}
+
+function finalizeIngestResult(params: {
+  provider: IngestProvider
+  fallbackUsed: boolean
+  imagery: IngestResult['imagery']
+  sceneRef: SceneRef
+  bbox: [number, number, number, number]
+  geometry: GeoJsonPolygon | null
+  ndviValues: Float32Array
+  ndviValidMask: Uint8Array
+  ndmiValues: Float32Array
+  ndmiValidMask: Uint8Array
+  width: number
+  height: number
+}) {
+  const outputSize = Math.min(params.width, params.height, 512)
+  const downsampledNdvi = downsampleGrid(
+    params.ndviValues,
+    params.ndviValidMask,
+    params.width,
+    params.height,
+    outputSize
+  )
+  const downsampledNdmi = downsampleGrid(
+    params.ndmiValues,
+    params.ndmiValidMask,
+    params.width,
+    params.height,
+    outputSize
+  )
+
+  const aoi = buildAoiMask(params.bbox, downsampledNdvi.width, downsampledNdvi.height, params.geometry)
+  const ndviStats = computeStats(downsampledNdvi.values, downsampledNdvi.validMask, aoi.mask)
+  const ndmiStats = computeStats(downsampledNdmi.values, downsampledNdmi.validMask, aoi.mask)
+  const previewPng = renderMetricPreviewPng(
+    downsampledNdvi.values,
+    downsampledNdvi.validMask,
+    downsampledNdvi.width,
+    downsampledNdvi.height,
+    ndviStats.min,
+    ndviStats.max
+  )
+
+  const grid3x3 = computeGrid3x3(
+    downsampledNdvi.values,
+    downsampledNdvi.validMask,
+    downsampledNdvi.width,
+    downsampledNdvi.height,
+    aoi.mask
+  )
+
+  const cellFootprints = buildCellFootprints(
+    params.bbox,
+    downsampledNdvi.width,
+    downsampledNdvi.height,
+    params.geometry,
+    aoi.mask
+  )
+
+  const alignment = deriveAlignment(params.bbox, downsampledNdvi.width, downsampledNdvi.height)
+
+  return {
+    provider: params.provider,
+    fallbackUsed: params.fallbackUsed,
+    imagery: params.imagery,
+    bbox: params.bbox,
+    alignment,
+    sceneRef: params.sceneRef,
+    dataResolutionMeters: round(alignment.pixelSizeMetersApprox, 3),
+    ndvi: {
+      previewPng,
+      width: downsampledNdvi.width,
+      height: downsampledNdvi.height,
+      metricGrid: {
+        encoded: encodeFloat32Grid(downsampledNdvi.values),
+        validMaskEncoded: encodeMaskGrid(downsampledNdvi.validMask),
+        normalizationMode: 'sceneAdaptiveRange',
+        width: downsampledNdvi.width,
+        height: downsampledNdvi.height,
+        min: ndviStats.min,
+        max: ndviStats.max,
+      },
+      stats: {
+        min: ndviStats.min,
+        max: ndviStats.max,
+        mean: ndviStats.mean,
+        p10: ndviStats.p10,
+        p90: ndviStats.p90,
+      },
+      validPixelRatio: ndviStats.validPixelRatio,
+      aoiMaskMeta: {
+        applied: aoi.applied,
+        coveredPixelRatio: round(aoi.coveredPixelRatio, 4),
+      },
+      grid3x3,
+      cellFootprints,
+    },
+    ndmi: {
+      metricGrid: {
+        encoded: encodeFloat32Grid(downsampledNdmi.values),
+        validMaskEncoded: encodeMaskGrid(downsampledNdmi.validMask),
+        normalizationMode: 'sceneAdaptiveRange',
+        width: downsampledNdmi.width,
+        height: downsampledNdmi.height,
+        min: ndmiStats.min,
+        max: ndmiStats.max,
+      },
+      stats: {
+        min: ndmiStats.min,
+        max: ndmiStats.max,
+        mean: ndmiStats.mean,
+        p10: ndmiStats.p10,
+        p90: ndmiStats.p90,
+      },
+    },
+  } satisfies IngestResult
+}
+
+async function runPlanetaryComputerProvider(input: NormalizedIngestRequest): Promise<IngestResult> {
+  const dateRange = toDateRange(input.date)
   const searchRes = await fetchWithTimeout(PLANETARY_STAC_SEARCH_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -433,54 +746,32 @@ async function runPlanetaryComputerProvider(input: Required<IngestRequest>): Pro
       bbox: input.bbox,
       datetime: input.date,
       collections: ['sentinel-2-l2a'],
-      limit: 16,
+      limit: 24,
       sortby: [{ field: 'properties.datetime', direction: 'desc' }],
     }),
   })
 
-  if (!searchRes.ok) {
-    throw new Error(`stac_search_failed_${searchRes.status}`)
-  }
+  if (!searchRes.ok) throw new Error(`stac_search_failed_${searchRes.status}`)
 
   const searchJson = await searchRes.json()
   const scene = pickBestScene(searchJson.features || [], input.policy, dateRange)
   if (!scene) throw new Error('no_imagery_found')
 
-  const bandB04Url = buildBandPreviewUrl({
-    itemId: scene.id,
-    bbox: input.bbox,
-    band: 'B04',
-    width: input.targetSize,
-    height: input.targetSize,
-  })
-  const bandB08Url = buildBandPreviewUrl({
-    itemId: scene.id,
-    bbox: input.bbox,
-    band: 'B08',
-    width: input.targetSize,
-    height: input.targetSize,
-  })
-
-  const [b04Res, b08Res] = await Promise.all([
-    fetchWithTimeout(bandB04Url, {}, FETCH_TIMEOUT_MS),
-    fetchWithTimeout(bandB08Url, {}, FETCH_TIMEOUT_MS),
+  const [b04, b08, b8a, b11] = await Promise.all([
+    fetchPlanetaryBand(input, String(scene.id), 'B04'),
+    fetchPlanetaryBand(input, String(scene.id), 'B08'),
+    fetchPlanetaryBand(input, String(scene.id), 'B8A'),
+    fetchPlanetaryBand(input, String(scene.id), 'B11'),
   ])
 
-  if (!b04Res.ok || !b08Res.ok) {
-    throw new Error(`band_fetch_failed_${b04Res.status}_${b08Res.status}`)
+  if (b04.width !== b08.width || b04.height !== b08.height || b04.width !== b8a.width || b04.height !== b8a.height || b04.width !== b11.width || b04.height !== b11.height) {
+    throw new Error('band_dimension_mismatch')
   }
 
-  const [redBuffer, nirBuffer] = await Promise.all([
-    b04Res.arrayBuffer().then((buf) => Buffer.from(buf)),
-    b08Res.arrayBuffer().then((buf) => Buffer.from(buf)),
-  ])
+  const ndvi = computeIndexGrid(b08.values, b04.values)
+  const ndmi = computeIndexGrid(b8a.values, b11.values)
 
-  const ndvi = computeNdviFromPngBuffers(redBuffer, nirBuffer)
-  const previewPng = renderNdviPngBase64(ndvi.ndviValues, ndvi.width, ndvi.height)
-  const grid3x3 = computeGrid3x3(ndvi.ndviValues, ndvi.width, ndvi.height, ndvi.validMask)
-  const metricGrid = downsampleNdviGrid(ndvi.ndviValues, ndvi.width, ndvi.height, 128)
-
-  return {
+  return finalizeIngestResult({
     provider: 'planetary-computer-preview',
     fallbackUsed: false,
     imagery: {
@@ -489,23 +780,20 @@ async function runPlanetaryComputerProvider(input: Required<IngestRequest>): Pro
       cloudCover: typeof scene?.properties?.['eo:cloud_cover'] === 'number' ? scene.properties['eo:cloud_cover'] : null,
       platform: scene?.properties?.platform || null,
     },
-    bbox: input.bbox,
-    ndvi: {
-      previewPng,
-      width: ndvi.width,
-      height: ndvi.height,
-      metricGrid: {
-        encoded: encodeFloat32Grid(metricGrid.values),
-        width: metricGrid.width,
-        height: metricGrid.height,
-        min: round(metricGrid.min, 4),
-        max: round(metricGrid.max, 4),
-      },
-      stats: ndvi.stats,
-      validPixelRatio: ndvi.validPixelRatio,
-      grid3x3,
+    sceneRef: {
+      provider: 'planetary-computer-preview',
+      sceneId: String(scene.id),
+      sceneDate: scene?.properties?.datetime || null,
     },
-  }
+    bbox: input.bbox,
+    geometry: input.geometry,
+    ndviValues: ndvi.values,
+    ndviValidMask: ndvi.validMask,
+    ndmiValues: ndmi.values,
+    ndmiValidMask: ndmi.validMask,
+    width: b04.width,
+    height: b04.height,
+  })
 }
 
 async function getTokenClassic() {
@@ -544,7 +832,7 @@ async function getTokenCdse() {
   return json.access_token as string
 }
 
-async function runSentinelHubProvider(input: Required<IngestRequest>): Promise<IngestResult> {
+async function runSentinelHubProvider(input: NormalizedIngestRequest): Promise<IngestResult> {
   let token = await getTokenClassic()
   let processUrl = PROCESS_URL_CLASSIC
   let providerLabel = 'sentinel-hub-classic'
@@ -563,28 +851,26 @@ async function runSentinelHubProvider(input: Required<IngestRequest>): Promise<I
   const fromIso = `${fromDate}T00:00:00Z`
   const toIso = `${toDate}T23:59:59Z`
 
-  const baseInput = {
-    bounds: {
-      bbox: input.bbox,
-      properties: { crs: 'http://www.opengis.net/def/crs/OGC/1.3/CRS84' },
-    },
-    data: [
-      {
-        type: 'S2L2A',
-        dataFilter: { timeRange: { from: fromIso, to: toIso }, mosaickingOrder: 'leastCC' },
-      },
-    ],
-  }
-
-  const tiffResponse = await fetchWithTimeout(processUrl, {
+  const response = await fetchWithTimeout(processUrl, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      input: baseInput,
-      evalscript: evalscriptNDVI,
+      input: {
+        bounds: {
+          bbox: input.bbox,
+          properties: { crs: 'http://www.opengis.net/def/crs/OGC/1.3/CRS84' },
+        },
+        data: [
+          {
+            type: 'S2L2A',
+            dataFilter: { timeRange: { from: fromIso, to: toIso }, mosaickingOrder: 'leastCC' },
+          },
+        ],
+      },
+      evalscript: evalscriptReflectanceCube,
       output: {
         responses: [{ identifier: 'default', format: { type: 'image/tiff' } }],
         width: input.targetSize,
@@ -593,64 +879,14 @@ async function runSentinelHubProvider(input: Required<IngestRequest>): Promise<I
     }),
   })
 
-  if (!tiffResponse.ok) {
-    throw new Error(`sentinel_tiff_process_failed_${tiffResponse.status}`)
-  }
+  if (!response.ok) throw new Error(`sentinel_cube_failed_${response.status}`)
 
-  const tiffArrayBuffer = await tiffResponse.arrayBuffer()
-  const tiff = await fromArrayBuffer(tiffArrayBuffer)
-  const image = await tiff.getImage()
-  const raster: any = await image.readRasters({ interleave: true })
-  const rawValues = raster as Float32Array
-  const ndviValues = new Float32Array(rawValues.length)
-  const validMask = new Uint8Array(rawValues.length)
+  const buffer = Buffer.from(await response.arrayBuffer())
+  const cube = await decodeReflectanceCubeTiff(buffer)
+  const ndvi = computeIndexGrid(cube.b08, cube.b04)
+  const ndmi = computeIndexGrid(cube.b8a, cube.b11)
 
-  const valid: number[] = []
-  for (let i = 0; i < rawValues.length; i++) {
-    const raw = Number(rawValues[i])
-    if (!Number.isFinite(raw)) {
-      ndviValues[i] = 0
-      continue
-    }
-    const value = clamp(raw, -1, 1)
-    ndviValues[i] = value
-    validMask[i] = 1
-    valid.push(value)
-  }
-
-  valid.sort((a, b) => a - b)
-  const min = valid.length ? valid[0] : 0
-  const max = valid.length ? valid[valid.length - 1] : 0
-  const mean = valid.length ? valid.reduce((acc, value) => acc + value, 0) / valid.length : 0
-  const p10 = valid.length ? quantile(valid, 0.1) : 0
-  const p90 = valid.length ? quantile(valid, 0.9) : 0
-
-  const pngResponse = await fetchWithTimeout(processUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      input: baseInput,
-      evalscript: evalscriptColorPNG,
-      output: {
-        responses: [{ identifier: 'default', format: { type: 'image/png' } }],
-        width: input.targetSize,
-        height: input.targetSize,
-      },
-    }),
-  })
-
-  if (!pngResponse.ok) {
-    throw new Error(`sentinel_png_process_failed_${pngResponse.status}`)
-  }
-
-  const pngBuffer = Buffer.from(await pngResponse.arrayBuffer())
-  const grid3x3 = computeGrid3x3(ndviValues, input.targetSize, input.targetSize, validMask)
-  const metricGrid = downsampleNdviGrid(ndviValues, input.targetSize, input.targetSize, 128)
-
-  return {
+  return finalizeIngestResult({
     provider: 'sentinel-hub-cdse',
     fallbackUsed: true,
     imagery: {
@@ -659,38 +895,20 @@ async function runSentinelHubProvider(input: Required<IngestRequest>): Promise<I
       cloudCover: null,
       platform: 'Sentinel-2',
     },
-    bbox: input.bbox,
-    ndvi: {
-      previewPng: pngBuffer.toString('base64'),
-      width: input.targetSize,
-      height: input.targetSize,
-      metricGrid: {
-        encoded: encodeFloat32Grid(metricGrid.values),
-        width: metricGrid.width,
-        height: metricGrid.height,
-        min: round(metricGrid.min, 4),
-        max: round(metricGrid.max, 4),
-      },
-      stats: {
-        min: round(min),
-        max: round(max),
-        mean: round(mean),
-        p10: round(p10),
-        p90: round(p90),
-      },
-      validPixelRatio: round(valid.length / Math.max(1, ndviValues.length), 4),
-      grid3x3,
+    sceneRef: {
+      provider: providerLabel,
+      sceneId: `${fromDate}-${toDate}`,
+      sceneDate: null,
     },
-  }
-}
-
-function providerFailure(provider: string, error: unknown): ProviderFailure {
-  const message = error instanceof Error ? error.message : 'unknown_error'
-  return {
-    provider,
-    code: message,
-    message,
-  }
+    bbox: input.bbox,
+    geometry: input.geometry,
+    ndviValues: ndvi.values,
+    ndviValidMask: ndvi.validMask,
+    ndmiValues: ndmi.values,
+    ndmiValidMask: ndmi.validMask,
+    width: cube.width,
+    height: cube.height,
+  })
 }
 
 export async function runIngestPipeline(input: IngestRequest) {
@@ -700,17 +918,20 @@ export async function runIngestPipeline(input: IngestRequest) {
 
   try {
     const primary = await runPlanetaryComputerProvider(normalized)
-    if (primary.ndvi.validPixelRatio < 0.5) {
-      warnings.push('Low valid pixel ratio detected. Consider adjusting date range or bbox.')
+    if (primary.ndvi.validPixelRatio < 0.45) {
+      warnings.push('Low valid pixel ratio detected. Consider adjusting date range or AOI.')
     }
     return { result: primary, warnings }
   } catch (error) {
     failures.push(providerFailure('planetary-computer-preview', error))
-    warnings.push('Primary free satellite provider failed; attempting fallback provider.')
+    warnings.push('Primary satellite provider failed; attempting Sentinel Hub fallback.')
   }
 
   try {
     const fallback = await runSentinelHubProvider(normalized)
+    if (fallback.ndvi.validPixelRatio < 0.45) {
+      warnings.push('Low valid pixel ratio detected in fallback provider output.')
+    }
     return { result: fallback, warnings }
   } catch (error) {
     failures.push(providerFailure('sentinel-hub-cdse', error))
@@ -731,6 +952,14 @@ export function toIngestErrorPayload(error: unknown) {
     return {
       error: 'bbox_required',
       message: 'Bounding box [minLon,minLat,maxLon,maxLat] is required.',
+      providers: [],
+    }
+  }
+
+  if (error instanceof Error && error.message === 'invalid_geometry') {
+    return {
+      error: 'invalid_geometry',
+      message: 'AOI geometry must be a valid GeoJSON Polygon.',
       providers: [],
     }
   }

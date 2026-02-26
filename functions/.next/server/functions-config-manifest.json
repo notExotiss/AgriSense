@@ -1,1 +1,1 @@
-{"version":1,"functions":{"/api/ai/simulate":{},"/api/gemini":{},"/ingest":{},"/api/geocode":{},"/api/terrain/fetch":{},"/api/timeseries":{}}}
+{"version":1,"functions":{"/api/ai/simulate":{},"/api/gemini":{},"/ingest":{},"/api/timeseries":{},"/api/geocode":{}}}

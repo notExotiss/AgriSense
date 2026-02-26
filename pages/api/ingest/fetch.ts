@@ -72,9 +72,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json(legacy)
     }
 
-    const { bbox, date, targetSize, policy } = req.body || {}
+    const { bbox, geometry, date, targetSize, policy } = req.body || {}
     const { result, warnings } = await runIngestPipeline({
       bbox,
+      geometry,
       date,
       targetSize,
       policy,

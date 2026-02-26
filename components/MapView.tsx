@@ -1,11 +1,11 @@
-import { MapContainer as RLMapContainer, TileLayer as RLTileLayer, ImageOverlay as RLImageOverlay, Polygon, Marker, Popup } from 'react-leaflet'
+import { MapContainer as RLMapContainer, TileLayer as RLTileLayer, ImageOverlay as RLImageOverlay, Polygon, Marker, Popup, useMap, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import 'leaflet-draw/dist/leaflet.draw.css'
 import 'leaflet-draw'
 import L, { LatLngBoundsExpression, LatLngExpression } from 'leaflet'
-import { useEffect, useRef, useMemo } from 'react'
+import { useCallback, useEffect, useRef, useMemo, useState } from 'react'
 import AoiGridMapOverlay from './AoiGridMapOverlay'
-import type { GridCellSummary } from '../lib/types/api'
+import type { CellFootprint, GridCellSummary } from '../lib/types/api'
 
 // Fix Leaflet default icons
 delete (L.Icon.Default.prototype as any)._getIconUrl
@@ -16,12 +16,97 @@ L.Icon.Default.mergeOptions({
 })
 
 interface Hotspot { position: LatLngExpression; label: string; }
+type DebugMetricGrid = {
+  values: number[]
+  width: number
+  height: number
+}
+type DebugHover = {
+  lat: number
+  lon: number
+  pixelX: number
+  pixelY: number
+  value: number | null
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function sampleNearest(
+  metricGrid: DebugMetricGrid | null | undefined,
+  alignmentBbox: [number, number, number, number] | null | undefined,
+  lat: number,
+  lon: number
+) {
+  if (!metricGrid || !alignmentBbox || !metricGrid.width || !metricGrid.height || !Array.isArray(metricGrid.values)) {
+    return { pixelX: -1, pixelY: -1, value: null }
+  }
+  const [minLon, minLat, maxLon, maxLat] = alignmentBbox
+  const lonRange = Math.max(1e-9, maxLon - minLon)
+  const latRange = Math.max(1e-9, maxLat - minLat)
+  const u = clamp((lon - minLon) / lonRange, 0, 1)
+  const v = clamp((maxLat - lat) / latRange, 0, 1)
+  const pixelX = clamp(Math.round(u * (metricGrid.width - 1)), 0, metricGrid.width - 1)
+  const pixelY = clamp(Math.round(v * (metricGrid.height - 1)), 0, metricGrid.height - 1)
+  const index = pixelY * metricGrid.width + pixelX
+  const raw = Number(metricGrid.values[index])
+  return {
+    pixelX,
+    pixelY,
+    value: Number.isFinite(raw) ? raw : null,
+  }
+}
+
+function MapDebugProbe({
+  enabled,
+  metricGrid,
+  alignmentBbox,
+  onHover,
+}: {
+  enabled: boolean
+  metricGrid?: DebugMetricGrid | null
+  alignmentBbox?: [number, number, number, number] | null
+  onHover: (hover: DebugHover | null) => void
+}) {
+  useMapEvents({
+    mousemove(event) {
+      if (!enabled) return
+      const lat = Number(event.latlng?.lat)
+      const lon = Number(event.latlng?.lng)
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        onHover(null)
+        return
+      }
+      const sampled = sampleNearest(metricGrid, alignmentBbox, lat, lon)
+      onHover({
+        lat,
+        lon,
+        pixelX: sampled.pixelX,
+        pixelY: sampled.pixelY,
+        value: sampled.value,
+      })
+    },
+    mouseout() {
+      onHover(null)
+    },
+  })
+  return null
+}
+
+function MapReadyBridge({ onReady }: { onReady: (map: L.Map) => void }) {
+  const map = useMap()
+  useEffect(() => {
+    onReady(map)
+  }, [map, onReady])
+  return null
+}
 
 /**
  * MapView props:
  * - ndviPng: (optional) base64 png (without data: prefix) - existing behavior preserved
  * - processedOverlayUrl: (optional) prefer a processed PNG hosted in public/ (e.g. /processed_topo.png)
- * - smoothOverlay: (optional) default true; apply browser smoothing and gentle filters
+ * - smoothOverlay: (optional) default false; precision mode keeps hard pixel alignment
  * - overlayOpacity: (optional) default 0.85
  */
 export default function MapView({
@@ -36,9 +121,16 @@ export default function MapView({
   smoothOverlay = true,
   overlayOpacity = 0.85,
   grid3x3,
+  cellFootprints,
   selectedCell,
   onSelectCell,
   showGrid = true,
+  debugMode = false,
+  debugMetricGrid,
+  debugAlignmentBbox,
+  debugResolutionMeters,
+  debugCoverage,
+  clearAoiSignal = 0,
 }:{
   bbox?: [number,number,number,number],
   onBboxChange?: (bbox:[number,number,number,number])=>void,
@@ -51,23 +143,62 @@ export default function MapView({
   smoothOverlay?: boolean,
   overlayOpacity?: number,
   grid3x3?: GridCellSummary[],
+  cellFootprints?: CellFootprint[],
   selectedCell?: string | null,
   onSelectCell?: (cellId: string) => void,
   showGrid?: boolean
+  debugMode?: boolean
+  debugMetricGrid?: DebugMetricGrid | null
+  debugAlignmentBbox?: [number, number, number, number] | null
+  debugResolutionMeters?: number | null
+  debugCoverage?: number | null
+  clearAoiSignal?: number
 }) {
   const mapRef = useRef<L.Map|null>(null)
+  const drawnItemsRef = useRef<L.FeatureGroup | null>(null)
+  const drawControlRef = useRef<any>(null)
+  const onBboxChangeRef = useRef(onBboxChange)
+  const onPolygonChangeRef = useRef(onPolygonChange)
+  const [mapReady, setMapReady] = useState(false)
+  const [debugHover, setDebugHover] = useState<DebugHover | null>(null)
 
-  // Draw controls (unchanged)
+  useEffect(() => {
+    onBboxChangeRef.current = onBboxChange
+  }, [onBboxChange])
+
+  useEffect(() => {
+    onPolygonChangeRef.current = onPolygonChange
+  }, [onPolygonChange])
+
+  // Draw controls
   useEffect(()=>{
     const map = mapRef.current
-    if (!map) return
+    if (!map || !mapReady) return
+    if (drawnItemsRef.current || drawControlRef.current) return
     const drawnItems = new L.FeatureGroup()
+    drawnItemsRef.current = drawnItems
     map.addLayer(drawnItems)
     // @ts-ignore
     const drawControl = new L.Control.Draw({
       draw: {
-        polygon: true,
-        rectangle: true,
+        polygon: {
+          shapeOptions: {
+            color: '#16a34a',
+            weight: 2,
+            opacity: 0.95,
+            fill: false,
+            fillOpacity: 0,
+          },
+        },
+        rectangle: {
+          shapeOptions: {
+            color: '#16a34a',
+            weight: 2,
+            opacity: 0.95,
+            fill: false,
+            fillOpacity: 0,
+          },
+        },
         polyline: false,
         circle: false,
         marker: false,
@@ -75,27 +206,54 @@ export default function MapView({
       },
       edit: { featureGroup: drawnItems }
     })
-    map.addControl(drawControl as any)
+    drawControlRef.current = drawControl as any
+    map.addControl(drawControlRef.current as any)
 
-    map.on((L as any).Draw.Event.CREATED, (e: any) => {
+    const onCreated = (e: any) => {
       const layer = e.layer
+      drawnItems.clearLayers()
+      if (typeof layer?.setStyle === 'function') {
+        layer.setStyle({
+          color: '#16a34a',
+          weight: 2,
+          opacity: 0.95,
+          fill: false,
+          fillOpacity: 0,
+        })
+      }
       drawnItems.addLayer(layer)
       if (layer.getBounds){
         const b = layer.getBounds()
         const west = b.getWest(), south = b.getSouth(), east = b.getEast(), north = b.getNorth()
-        onBboxChange && onBboxChange([west, south, east, north])
+        onBboxChangeRef.current && onBboxChangeRef.current([west, south, east, north])
       }
       if (layer.getLatLngs){
         const coords = layer.getLatLngs()[0] || []
-        onPolygonChange && onPolygonChange(coords)
+        onPolygonChangeRef.current && onPolygonChangeRef.current(coords)
       }
-    })
+    }
+    map.on((L as any).Draw.Event.CREATED, onCreated)
 
     return () => {
-      map.removeControl(drawControl as any)
-      map.removeLayer(drawnItems)
+      map.off((L as any).Draw.Event.CREATED, onCreated)
+      if (drawControlRef.current) {
+        map.removeControl(drawControlRef.current as any)
+      }
+      if (drawnItemsRef.current) {
+        map.removeLayer(drawnItemsRef.current)
+      }
+      drawControlRef.current = null
+      drawnItemsRef.current = null
     }
-  }, [mapRef.current])
+  }, [mapReady])
+
+  useEffect(() => {
+    if (!mapReady) return
+    if (!drawnItemsRef.current) return
+    drawnItemsRef.current.clearLayers()
+    onPolygonChangeRef.current && onPolygonChangeRef.current([])
+    setDebugHover(null)
+  }, [clearAoiSignal, mapReady])
 
   const defaultCenter: LatLngExpression = [40, -95]
   const defaultZoom = 5
@@ -140,30 +298,29 @@ export default function MapView({
     return null
   }, [processedOverlayUrl, ndviPng])
 
-  // Inject a tiny stylesheet once to encourage smooth interpolation for the overlay image.
+  // Inject a tiny stylesheet once to control overlay interpolation mode.
   useEffect(() => {
-    if (!smoothOverlay) return
-    const id = 'leaflet-image-smooth-css'
+    const id = 'leaflet-image-overlay-css'
     if (document.getElementById(id)) return
     const style = document.createElement('style')
     style.id = id
-    // image-rendering: auto + -webkit-optimize-contrast helps browsers avoid nearest-neighbor scaling.
-    // filter: blur + contrast + saturate gives a gentle smoothing and reduces harsh spikes.
     style.textContent = `
       .leaflet-image-smooth {
         image-rendering: auto !important;
-        -ms-interpolation-mode: bicubic !important; /* IE */
+        -ms-interpolation-mode: bicubic !important;
         image-rendering: -webkit-optimize-contrast !important;
         will-change: transform;
       }
-      .leaflet-image-smooth.smooth-filter {
-        filter: blur(0.7px) contrast(0.98) saturate(1.05);
-        /* slight blur to remove thin spiky lines, small contrast/saturation tweak */
+      .leaflet-image-precision {
+        image-rendering: pixelated !important;
+        image-rendering: crisp-edges !important;
+        -ms-interpolation-mode: nearest-neighbor !important;
+        will-change: transform;
       }
     `
     document.head.appendChild(style)
-    return () => { /* keep it for app lifetime; no cleanup required */ }
-  }, [smoothOverlay])
+    return () => { /* keep for app lifetime */ }
+  }, [])
 
   // Build the overlay element if we have an image + bounds
   const overlayBounds = ndviBounds && ndviBounds.length === 4
@@ -176,42 +333,85 @@ export default function MapView({
       bounds={overlayBounds}
       opacity={overlayOpacity}
       crossOrigin="anonymous"
-      className={`leaflet-image-smooth ${smoothOverlay ? 'smooth-filter' : ''}`}
+      className={smoothOverlay ? 'leaflet-image-smooth' : 'leaflet-image-precision'}
       style={{
-        imageRendering: 'auto',
+        imageRendering: smoothOverlay ? 'auto' : 'pixelated',
         transform: 'translateZ(0)',
       }}
     />
   ) : null
 
+  const handleMapReady = useCallback((map: L.Map) => {
+    mapRef.current = map
+    setMapReady(true)
+  }, [])
+
   return (
-    <AnyMap
-      ref={mapRef as any}
-      center={defaultCenter}
-      zoom={defaultZoom}
-      style={{ height: '100%', width: '100%', borderRadius: 12, overflow: 'hidden', zIndex: 0 }}
-    >
-      <AnyTile
-        attribution='&copy; OpenStreetMap contributors'
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-      />
-      {overlay}
-      <AoiGridMapOverlay
-        bbox={ndviBounds || bbox}
-        cells={grid3x3}
-        selectedCell={selectedCell}
-        onSelectCell={onSelectCell}
-        visible={Boolean(showGrid && (ndviBounds || bbox))}
-      />
-      {polygon && polygon.length>0 && (
-        <Polygon positions={polygon} pathOptions={{ color: '#16a34a', weight: 2 }} />
+    <div className="relative h-full w-full">
+      <AnyMap
+        ref={mapRef as any}
+        center={defaultCenter}
+        zoom={defaultZoom}
+        style={{ height: '100%', width: '100%', borderRadius: 12, overflow: 'hidden', zIndex: 0 }}
+      >
+        <MapReadyBridge onReady={handleMapReady} />
+        <AnyTile
+          attribution='&copy; OpenStreetMap contributors'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+        <MapDebugProbe
+          enabled={Boolean(debugMode)}
+          metricGrid={debugMetricGrid}
+          alignmentBbox={debugAlignmentBbox || ndviBounds || bbox || null}
+          onHover={setDebugHover}
+        />
+        {overlay}
+        <AoiGridMapOverlay
+          bbox={ndviBounds || bbox}
+          cells={grid3x3}
+          cellFootprints={cellFootprints}
+          selectedCell={selectedCell}
+          onSelectCell={onSelectCell}
+          visible={Boolean(showGrid && (ndviBounds || bbox))}
+        />
+        {polygon && polygon.length>0 && (
+          <Polygon positions={polygon} pathOptions={{ color: '#16a34a', weight: 2 }} />
+        )}
+        {(hotspots || []).map((h,i)=> (
+          <Marker key={i} position={h.position as any}>
+            <Popup>{h.label}</Popup>
+          </Marker>
+        ))}
+      </AnyMap>
+      {debugMode && (
+        <div className="pointer-events-none absolute left-3 top-3 z-[500] rounded-lg border border-zinc-300/80 bg-white/90 px-2 py-1 text-[11px] font-medium text-zinc-800 shadow-sm backdrop-blur-sm">
+          {debugHover ? (
+            <>
+              <p>
+                lat/lon: {debugHover.lat.toFixed(6)}, {debugHover.lon.toFixed(6)}
+              </p>
+              <p>
+                px: {debugHover.pixelX}, {debugHover.pixelY}
+              </p>
+              <p>
+                value:{' '}
+                {typeof debugHover.value === 'number' && Number.isFinite(debugHover.value)
+                  ? debugHover.value.toFixed(4)
+                  : 'n/a'}
+              </p>
+              {typeof debugResolutionMeters === 'number' && Number.isFinite(debugResolutionMeters) && (
+                <p>resolution: ~{debugResolutionMeters.toFixed(2)}m/pixel</p>
+              )}
+              {typeof debugCoverage === 'number' && Number.isFinite(debugCoverage) && (
+                <p>AOI coverage: {(debugCoverage * 100).toFixed(1)}%</p>
+              )}
+            </>
+          ) : (
+            <p>Move cursor to inspect raster sample</p>
+          )}
+        </div>
       )}
-      {(hotspots || []).map((h,i)=> (
-        <Marker key={i} position={h.position as any}>
-          <Popup>{h.label}</Popup>
-        </Marker>
-      ))}
-    </AnyMap>
+    </div>
   )
 }
 

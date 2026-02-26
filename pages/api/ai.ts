@@ -29,13 +29,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (!result.chat) {
       const retryAfterMs = Number(result.llmUnavailable?.retryAfterMs || 0) || 8000
-      const answer = `Gemini is temporarily unavailable for this request. Retry in about ${Math.max(1, Math.round(retryAfterMs / 1000))}s.`
+      const answer = `Gemini unavailable right now. Retry in about ${Math.max(1, Math.round(retryAfterMs / 1000))}s.`
       return res.status(200).json({
         answer,
-        sections: {
-          rationale: 'The assistant backend did not return a usable model response.',
-          actions: ['Retry shortly.', 'Check Gemini model availability if this persists.'],
-        },
+        sections: {},
         output: answer,
         assistantBackend: 'unavailable',
         unavailable: true,
@@ -63,7 +60,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(200).json({
       answer: result.chat.answer,
       sections: result.chat.sections,
-      output: result.chat.text,
+      output: result.chat.answer,
       assistantBackend: result.chat.backend || 'llm-gemini',
       engine: result.inference.engine,
       confidence: result.inference.confidence,
@@ -81,7 +78,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     })
   } catch (error: any) {
     const message = String(error?.message || 'Unexpected inference error')
-    const answer = 'Gemini is temporarily unavailable for this request. Please retry shortly.'
+    const answer = 'Gemini unavailable right now. Retry in a few seconds.'
     return res.status(200).json({
       answer,
       output: answer,

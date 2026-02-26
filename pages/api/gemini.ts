@@ -123,68 +123,28 @@ function sanitizeRequestBody(body: any) {
   }
 }
 
-function explainLlmFailure(lastFailure?: string, retryAfterMs?: number) {
+function unavailableMessage(retryAfterMs?: number) {
   const retrySeconds = retryAfterMs && retryAfterMs > 0 ? Math.max(1, Math.round(retryAfterMs / 1000)) : null
-  const retryText = retrySeconds ? ` Retry in about ${retrySeconds}s.` : ''
-  const failure = String(lastFailure || '').toLowerCase()
+  return retrySeconds
+    ? `Gemini unavailable right now. Retry in about ${retrySeconds}s.`
+    : 'Gemini unavailable right now. Retry in a few seconds.'
+}
 
-  if (failure.includes('gemini_key_leaked')) {
-    return {
-      answer: `Gemini is blocked because the configured API key was reported as leaked.${retryText}`,
-      rationale: 'Google rejected the key at the provider layer before the model could run.',
-      actions: [
-        'Create a new Gemini API key in Google AI Studio.',
-        'Set only GEMINI_API_KEY on the server and remove NEXT_PUBLIC_GEMINI_API_KEY from client env.',
-        'Restart the Next.js server after updating the key.',
-      ],
-    }
-  }
+const globalRuntime = globalThis as typeof globalThis & { __agrisenseGeminiEnvWarned?: boolean }
 
-  if (failure.includes('gemini_key_missing')) {
-    return {
-      answer: `Gemini is unavailable because no API key is configured.${retryText}`,
-      rationale: 'The server is missing GEMINI_API_KEY (or equivalent server-side key variable).',
-      actions: [
-        'Set GEMINI_API_KEY in Vercel Project Settings for Production/Preview/Development as needed.',
-        'Redeploy so the serverless function picks up the new environment variable.',
-        'Keep the key server-side only; do not rely on NEXT_PUBLIC_* for production auth.',
-      ],
-    }
-  }
-
-  if (failure.includes('gemini_key_invalid') || failure.includes('permission_denied')) {
-    return {
-      answer: `Gemini rejected the API credentials for this request.${retryText}`,
-      rationale: 'The provider returned an authorization failure.',
-      actions: [
-        'Verify GEMINI_API_KEY is valid and active.',
-        'Confirm the key has access to Gemini generateContent.',
-        'Restart the server after any env changes.',
-      ],
-    }
-  }
-
-  if (failure.includes('gemini_http_404')) {
-    return {
-      answer: `Gemini model configuration is invalid for the current API version.${retryText}`,
-      rationale: 'The configured model name could not be resolved by the provider.',
-      actions: [
-        'Set GEMINI_MODEL to a currently available model from the Gemini ListModels endpoint.',
-        'Optionally set GEMINI_FALLBACK_MODELS to additional supported models.',
-        'Restart the server after changing environment variables.',
-      ],
-    }
-  }
-
-  return {
-    answer: `Gemini is temporarily unavailable for this request.${retryText}`,
-    rationale: 'The LLM provider did not return a usable response for this request.',
-    actions: ['Retry the same question in a moment.', 'If this persists, verify GEMINI_API_KEY and model availability.'],
+function warnGeminiEnvIfNeeded() {
+  const hasServerKey = Boolean(
+    process.env.GEMINI_API_KEY || process.env.AGRISENSE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+  )
+  if (!hasServerKey && !globalRuntime.__agrisenseGeminiEnvWarned) {
+    globalRuntime.__agrisenseGeminiEnvWarned = true
+    console.warn('[AgriSense] Gemini server API key missing. Configure GEMINI_API_KEY for /api/gemini.')
   }
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).end()
+  warnGeminiEnvIfNeeded()
 
   try {
     const sanitized = sanitizeRequestBody(req.body)
@@ -207,24 +167,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (!chat) {
       const retryAfterMs = Number(llmUnavailable?.retryAfterMs || 0) || undefined
-      const failure = explainLlmFailure(llmUnavailable?.lastFailure || llmUnavailable?.message, retryAfterMs)
       const attemptedModels = Array.isArray(llmUnavailable?.attemptedModels) ? llmUnavailable?.attemptedModels : []
       const llmRetries = Number(llmUnavailable?.retries || 0)
+      const message = unavailableMessage(retryAfterMs)
       return res.status(200).json({
         success: true,
         unavailable: true,
         retryAfterMs,
         assistantBackend: 'unavailable',
         warnings: [llmUnavailable?.lastFailure || llmUnavailable?.message || 'gemini_unavailable'],
-        answer: failure.answer,
-        sections: {
-          rationale: failure.rationale,
-          actions: failure.actions,
-        },
+        answer: message,
+        sections: {},
         renderModel: 'qa',
         usedHistory: false,
-        suggestion: failure.answer,
-        output: failure.answer,
+        suggestion: message,
+        output: message,
         model: inference.engine,
         engine: inference.engine,
         confidence: inference.confidence,
@@ -261,8 +218,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       sections: chat.sections,
       renderModel: chat.renderModel,
       usedHistory: chat.usedHistory,
-      suggestion: chat.text,
-      output: chat.text,
+      suggestion: chat.answer,
+      output: chat.answer,
       assistantBackend: fallbackMode ? 'unavailable' : chat.backend || 'llm-gemini',
       warnings: fallbackWarning ? [fallbackWarning] : [],
       model: inference.engine,
@@ -291,27 +248,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     })
   } catch (error: any) {
     const message = String(error?.message || '')
-    const fallbackFailure = explainLlmFailure(message, 8000)
     if (message.toLowerCase().includes('body exceeded')) {
       return res.status(413).json({
         error: 'request_too_large',
         message: 'Request body exceeded limit. Send compact context only.',
       })
     }
+    const unavailable = unavailableMessage(8000)
     return res.status(200).json({
       success: true,
       unavailable: true,
       retryAfterMs: 8000,
       warnings: [message || 'gemini_unavailable'],
-      answer: fallbackFailure.answer,
-      sections: {
-        rationale: fallbackFailure.rationale,
-        actions: fallbackFailure.actions,
-      },
+      answer: unavailable,
+      sections: {},
       renderModel: 'qa',
       usedHistory: false,
-      suggestion: fallbackFailure.answer,
-      output: fallbackFailure.answer,
+      suggestion: unavailable,
+      output: unavailable,
       assistantBackend: 'unavailable',
       model: 'agrisense-ml-engine',
       engine: 'agrisense-ml-engine',

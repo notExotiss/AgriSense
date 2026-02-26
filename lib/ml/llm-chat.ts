@@ -19,11 +19,12 @@ const DEFAULT_MODEL = 'gemini-2.5-flash'
 const DEFAULT_FALLBACK_MODELS = [
   'gemini-2.0-flash',
   'gemini-2.0-flash-lite',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
 ]
 const REQUEST_TIMEOUT_MS = 25000
 const MAX_RETRIES_PER_MODEL = 2
+const MODEL_DISCOVERY_CACHE_TTL_MS = 1000 * 60 * 5
+
+let discoveredModelCache: { models: string[]; expiresAt: number } | null = null
 
 export class GeminiUnavailableError extends Error {
   attemptedModels: string[]
@@ -298,6 +299,11 @@ async function requestGeminiContent(
 }
 
 async function discoverGeminiModels(apiKey: string): Promise<string[]> {
+  const now = Date.now()
+  if (discoveredModelCache && discoveredModelCache.expiresAt > now) {
+    return discoveredModelCache.models
+  }
+
   const discovered: string[] = []
   for (const base of GEMINI_API_BASES) {
     try {
@@ -316,7 +322,14 @@ async function discoverGeminiModels(apiKey: string): Promise<string[]> {
       // ignore and keep trying alternate API base
     }
   }
-  return Array.from(new Set(discovered))
+  const unique = Array.from(new Set(discovered))
+  if (unique.length > 0) {
+    discoveredModelCache = {
+      models: unique,
+      expiresAt: now + MODEL_DISCOVERY_CACHE_TTL_MS,
+    }
+  }
+  return unique
 }
 
 function parseGeminiError(text: string) {
@@ -340,8 +353,7 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
   const apiKey =
     process.env.GEMINI_API_KEY ||
     process.env.AGRISENSE_GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.NEXT_PUBLIC_GEMINI_API_KEY
+    process.env.GOOGLE_API_KEY
   if (!apiKey) {
     throw new GeminiUnavailableError('gemini_api_key_missing', {
       attemptedModels: [],
@@ -406,7 +418,11 @@ export async function composeLlmChatResponse(input: LlmComposeInput): Promise<ML
       ? configuredCandidates.filter((model) => discoveredSet.has(model))
       : configuredCandidates
   const modelCandidates: string[] = Array.from(
-    new Set<string>([...prioritizedConfigured, ...discoveredCandidates, ...configuredCandidates])
+    new Set<string>(
+      discoveredSet.size > 0
+        ? [...prioritizedConfigured, ...discoveredCandidates]
+        : [...prioritizedConfigured, ...configuredCandidates]
+    )
   )
   for (const model of modelCandidates) {
     if (!attemptedModels.includes(model)) attemptedModels.push(model)

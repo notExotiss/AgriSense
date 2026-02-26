@@ -1,6 +1,6 @@
 import React from 'react'
-import { Rectangle, Tooltip } from 'react-leaflet'
-import type { GridCellSummary } from '../lib/types/api'
+import { Polygon, Rectangle, Tooltip } from 'react-leaflet'
+import type { CellFootprint, GridCellSummary } from '../lib/types/api'
 
 function cellColor(level?: GridCellSummary['stressLevel'], active?: boolean) {
   if (active) return '#22d3ee'
@@ -54,15 +54,31 @@ function cellBounds(bbox: [number, number, number, number], row: number, col: nu
   ] as [[number, number], [number, number]]
 }
 
+function toLeafletPolygon(footprint: CellFootprint | undefined | null) {
+  const ring = footprint?.polygon?.coordinates?.[0]
+  if (!Array.isArray(ring) || ring.length < 4) return null
+  const points = ring
+    .map((coord) => {
+      const lon = Number(coord?.[0])
+      const lat = Number(coord?.[1])
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null
+      return [lat, lon] as [number, number]
+    })
+    .filter((point): point is [number, number] => Array.isArray(point) && point.length === 2)
+  return points.length >= 4 ? points : null
+}
+
 export default function AoiGridMapOverlay({
   bbox,
   cells,
+  cellFootprints,
   selectedCell,
   onSelectCell,
   visible = true,
 }: {
   bbox?: [number, number, number, number]
   cells?: GridCellSummary[]
+  cellFootprints?: CellFootprint[]
   selectedCell?: string | null
   onSelectCell?: (cellId: string) => void
   visible?: boolean
@@ -74,16 +90,42 @@ export default function AoiGridMapOverlay({
     <>
       {normalized.map((cell) => {
         const selected = selectedCell === cell.cellId
+        const footprint = Array.isArray(cellFootprints)
+          ? cellFootprints.find((entry) => entry.cellId === cell.cellId)
+          : null
+        const polygonPoints = toLeafletPolygon(footprint)
+
+        const pathOptions = {
+          color: cellColor(cell.stressLevel, selected),
+          weight: selected ? 3.2 : 1.7,
+          opacity: selected ? 0.95 : 0.75,
+          fill: false,
+          fillOpacity: 0,
+        }
+
+        if (polygonPoints) {
+          return (
+            <Polygon
+              key={`grid-map-poly-${cell.cellId}`}
+              positions={polygonPoints as any}
+              pathOptions={pathOptions}
+              eventHandlers={{
+                click: () => onSelectCell?.(cell.cellId),
+              }}
+            >
+              <Tooltip>
+                Plot Point {plotPointLabel(cell)} | mean {cell.mean.toFixed(3)} | {cell.stressLevel}
+                {typeof footprint?.coverage === 'number' ? ` | coverage ${(footprint.coverage * 100).toFixed(1)}%` : ''}
+              </Tooltip>
+            </Polygon>
+          )
+        }
+
         return (
           <Rectangle
             key={`grid-map-${cell.cellId}`}
             bounds={cellBounds(bbox, cell.row, cell.col)}
-            pathOptions={{
-              color: cellColor(cell.stressLevel, selected),
-              weight: selected ? 3.2 : 1.7,
-              opacity: selected ? 0.95 : 0.75,
-              fillOpacity: selected ? 0.24 : 0.1,
-            }}
+            pathOptions={pathOptions}
             eventHandlers={{
               click: () => onSelectCell?.(cell.cellId),
             }}

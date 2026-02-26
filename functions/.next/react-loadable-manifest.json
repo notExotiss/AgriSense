@@ -2,7 +2,7 @@
   "_app.tsx -> mapbox-gl": {
     "id": 6158,
     "files": [
-      "static/chunks/2c796e83.ef00145baba72831.js"
+      "static/chunks/2c796e83.127c3d2903fcdba8.js"
     ]
   },
   "_app.tsx -> sonner": {
@@ -12,21 +12,21 @@
     ]
   },
   "dashboard.tsx -> ../components/AoiTerrain3D": {
-    "id": 7808,
+    "id": 8499,
     "files": [
       "static/chunks/2d36dd80.fe5052b4f0bfcbb4.js",
       "static/chunks/fb7d5399.d7b2a37773fa5fa4.js",
       "static/chunks/365.2946d3d9eb5bcb4d.js",
-      "static/chunks/808.772464cf008163f2.js"
+      "static/chunks/499.0242b40814f13dba.js"
     ]
   },
   "dashboard.tsx -> ../components/MapView": {
     "id": 4246,
     "files": [
       "static/chunks/0b7b90cd.abad55a865e4a8c0.js",
-      "static/chunks/165.2a74788da7c23287.js",
+      "static/chunks/468.9a5c1b9804d26dce.js",
       "static/css/43585300734e60e1.css",
-      "static/chunks/99.a57f23b7dc9c93cd.js"
+      "static/chunks/99.9387daaba5448a00.js"
     ]
   },
   "index.tsx -> ../components/home/HeroTerrainSequence": {
@@ -35,7 +35,7 @@
       "static/chunks/2d36dd80.fe5052b4f0bfcbb4.js",
       "static/chunks/fb7d5399.d7b2a37773fa5fa4.js",
       "static/chunks/365.2946d3d9eb5bcb4d.js",
-      "static/chunks/780.b40635c2ea30648e.js"
+      "static/chunks/780.810c1b260e35c795.js"
     ]
   }
 }

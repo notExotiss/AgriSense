@@ -14,7 +14,7 @@ import { auth, isFirebaseClientConfigured } from '../lib/firebaseClient'
 import { mapGoogleSignInError, signInWithGoogle } from '../lib/client/auth'
 import { ApiClientError, mapSaveError, savePlot } from '../lib/client/api'
 import { canvasToBase64Png, renderMetricCanvas } from '../lib/visual/metric-render'
-import type { GeocodePlace, GridCellSummary, ProviderDiagnostic } from '../lib/types/api'
+import type { CellFootprint, GeocodePlace, GeoJsonPolygon, GridCellSummary, ProviderDiagnostic, RasterAlignment } from '../lib/types/api'
 
 const MapView = dynamic(() => import('../components/MapView'), { ssr: false })
 const AoiTerrain3D = dynamic(() => import('../components/AoiTerrain3D'), { ssr: false })
@@ -26,12 +26,21 @@ type IngestData = {
   fallbackUsed: boolean
   imagery: { id: string; date: string | null; cloudCover: number | null; platform: string | null }
   bbox: [number, number, number, number]
+  alignment: RasterAlignment
+  sceneRef: {
+    provider: string
+    sceneId: string
+    sceneDate: string | null
+  }
+  dataResolutionMeters: number
   ndvi: {
     previewPng: string
     width: number
     height: number
     metricGrid?: {
       encoded: string
+      validMaskEncoded?: string
+      normalizationMode?: 'fixedPhysicalRange' | 'sceneAdaptiveRange'
       width: number
       height: number
       min: number
@@ -39,12 +48,31 @@ type IngestData = {
     }
     stats: { min: number; max: number; mean: number; p10?: number; p90?: number }
     validPixelRatio: number
+    aoiMaskMeta?: {
+      applied: boolean
+      coveredPixelRatio: number
+    }
     grid3x3: GridCellSummary[]
+    cellFootprints?: CellFootprint[]
+  }
+  ndmi?: {
+    metricGrid?: {
+      encoded: string
+      validMaskEncoded?: string
+      normalizationMode?: 'fixedPhysicalRange' | 'sceneAdaptiveRange'
+      width: number
+      height: number
+      min: number
+      max: number
+    }
+    stats?: { min: number; max: number; mean: number; p10?: number; p90?: number }
   }
 }
 
 type LayerMetricGrid = {
   values: number[]
+  validMask?: number[]
+  normalizationMode?: 'fixedPhysicalRange' | 'sceneAdaptiveRange'
   width: number
   height: number
   min: number
@@ -52,6 +80,20 @@ type LayerMetricGrid = {
   source: string
   units: string
   isSimulated: boolean
+}
+
+type LayerResponseState = {
+  unavailable?: boolean
+  message?: string
+  source?: string
+  isSimulated?: boolean
+  representation?: string
+  stats?: { min: number; max: number; mean: number }
+  overlayPng?: string
+  metricGrid?: LayerMetricGrid | null
+  alignment?: RasterAlignment
+  baseline?: any
+  proxy?: any
 }
 
 function parseBbox(value: string): [number, number, number, number] | null {
@@ -63,15 +105,6 @@ function parseBbox(value: string): [number, number, number, number] | null {
 function bboxFromPlace(place: GeocodePlace) {
   const [south, north, west, east] = place.bbox
   return `${west},${south},${east},${north}`
-}
-
-function decodeBase64Json(encoded: string) {
-  if (typeof window === 'undefined') return null
-  try {
-    return JSON.parse(window.atob(encoded))
-  } catch {
-    return null
-  }
 }
 
 function normalizeStats(stats: any, fallback = { min: 0, max: 0, mean: 0 }) {
@@ -97,14 +130,74 @@ function decodeFloat32Grid(encoded: string, width: number, height: number) {
     }
     const expected = width * height
     const floats = new Float32Array(bytes.buffer, bytes.byteOffset, Math.min(expected, Math.floor(bytes.byteLength / 4)))
-    const values = new Array(expected).fill(0)
+    const values = new Array<number>(expected)
     for (let i = 0; i < expected; i++) {
       const value = floats[i]
-      values[i] = Number.isFinite(value) ? Number(value) : 0
+      values[i] = Number.isFinite(value) ? Number(value) : Number.NaN
     }
     return values
   } catch {
     return null
+  }
+}
+
+function decodeMaskGrid(encoded: string, width: number, height: number) {
+  if (!encoded || typeof window === 'undefined') return null
+  try {
+    const binary = window.atob(encoded)
+    const expected = width * height
+    const values = new Array<number>(expected)
+    for (let i = 0; i < expected; i++) {
+      values[i] = i < binary.length ? (binary.charCodeAt(i) > 0 ? 1 : 0) : 0
+    }
+    return values
+  } catch {
+    return null
+  }
+}
+
+function normalizeHybridLayerPayload(payload: any, kind: 'soil' | 'et'): LayerResponseState {
+  const unavailable = Boolean(payload?.unavailable)
+  const data = payload?.data
+  const metric = data?.metricGrid
+
+  let metricGrid: LayerMetricGrid | null = null
+  if (
+    metric?.encoded &&
+    metric?.validMaskEncoded &&
+    Number(metric?.width) > 1 &&
+    Number(metric?.height) > 1
+  ) {
+    const decoded = decodeFloat32Grid(metric.encoded, Number(metric.width), Number(metric.height))
+    if (decoded && decoded.length >= Number(metric.width) * Number(metric.height)) {
+      const decodedMask = decodeMaskGrid(String(metric.validMaskEncoded), Number(metric.width), Number(metric.height))
+      metricGrid = {
+        values: decoded,
+        validMask: decodedMask || undefined,
+        normalizationMode: metric?.normalizationMode === 'fixedPhysicalRange' ? 'fixedPhysicalRange' : 'sceneAdaptiveRange',
+        width: Number(metric.width),
+        height: Number(metric.height),
+        min: Number.isFinite(Number(metric?.min)) ? Number(metric.min) : 0,
+        max: Number.isFinite(Number(metric?.max)) ? Number(metric.max) : 1,
+        source: String(data?.source || payload?.source || kind),
+        units: kind === 'soil' ? 'm3/m3' : 'mm/day',
+        isSimulated: Boolean(payload?.isSimulated),
+      }
+    }
+  }
+
+  return {
+    unavailable,
+    message: typeof payload?.message === 'string' ? payload.message : undefined,
+    source: payload?.source,
+    isSimulated: Boolean(payload?.isSimulated),
+    representation: payload?.representation,
+    stats: normalizeStats(data?.stats || payload?.stats),
+    overlayPng: typeof data?.overlayPng === 'string' ? data.overlayPng : undefined,
+    metricGrid,
+    alignment: payload?.alignment,
+    baseline: payload?.baseline,
+    proxy: payload?.proxy,
   }
 }
 
@@ -198,18 +291,20 @@ export default function Dashboard() {
   const [layer, setLayer] = useState<'ndvi' | 'soil' | 'et'>('ndvi')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [cacheClearing, setCacheClearing] = useState(false)
   const [showDebug, setShowDebug] = useState(false)
   const [showGrid, setShowGrid] = useState(true)
   const [selectedCell, setSelectedCell] = useState<string | null>(null)
   const [showTerrain3D, setShowTerrain3D] = useState(false)
+  const [clearAoiSignal, setClearAoiSignal] = useState(0)
   const layerImageContainerRef = useRef<HTMLDivElement | null>(null)
   const layerImageRef = useRef<HTMLImageElement | null>(null)
   const [gridFrame, setGridFrame] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
 
   const [ingest, setIngest] = useState<IngestData | null>(null)
   const [weather, setWeather] = useState<any>(null)
-  const [soil, setSoil] = useState<any>(null)
-  const [et, setEt] = useState<any>(null)
+  const [soil, setSoil] = useState<LayerResponseState | null>(null)
+  const [et, setEt] = useState<LayerResponseState | null>(null)
   const [timeSeries, setTimeSeries] = useState<any>(null)
   const [inference, setInference] = useState<any>(null)
   const [scenarioLoading, setScenarioLoading] = useState(false)
@@ -243,14 +338,19 @@ export default function Dashboard() {
       : layer === 'soil'
         ? soil?.overlayPng
         : et?.overlayPng
+  const selectedLayerState =
+    layer === 'soil' ? soil : layer === 'et' ? et : null
 
   const ndviMetricGrid = useMemo<LayerMetricGrid | null>(() => {
     const grid = ingest?.ndvi?.metricGrid
-    if (!grid?.encoded || !grid?.width || !grid?.height) return null
+    if (!grid?.encoded || !grid?.validMaskEncoded || !grid?.width || !grid?.height) return null
     const values = decodeFloat32Grid(grid.encoded, grid.width, grid.height)
     if (!values || !values.length) return null
+    const validMask = decodeMaskGrid(String(grid.validMaskEncoded), grid.width, grid.height)
     return {
       values,
+      validMask: validMask || undefined,
+      normalizationMode: grid.normalizationMode === 'fixedPhysicalRange' ? 'fixedPhysicalRange' : 'sceneAdaptiveRange',
       width: grid.width,
       height: grid.height,
       min: Number.isFinite(grid.min) ? grid.min : ndviStats.min,
@@ -259,7 +359,7 @@ export default function Dashboard() {
       units: 'NDVI',
       isSimulated: false,
     }
-  }, [ingest?.ndvi?.metricGrid?.encoded, ingest?.ndvi?.metricGrid?.width, ingest?.ndvi?.metricGrid?.height, ingest?.ndvi?.metricGrid?.min, ingest?.ndvi?.metricGrid?.max, ingest?.provider, ndviStats.min, ndviStats.max])
+  }, [ingest?.ndvi?.metricGrid?.encoded, ingest?.ndvi?.metricGrid?.validMaskEncoded, ingest?.ndvi?.metricGrid?.width, ingest?.ndvi?.metricGrid?.height, ingest?.ndvi?.metricGrid?.min, ingest?.ndvi?.metricGrid?.max, ingest?.provider, ndviStats.min, ndviStats.max])
 
   const layerMetricGrid = useMemo<LayerMetricGrid | null>(() => {
     if (layer === 'soil') return soil?.metricGrid || null
@@ -277,6 +377,7 @@ export default function Dashboard() {
         metric: layer,
         grid: {
           values: layerMetricGrid.values,
+          validMask: layerMetricGrid.validMask,
           width: layerMetricGrid.width,
           height: layerMetricGrid.height,
           min: layerMetricGrid.min,
@@ -286,11 +387,58 @@ export default function Dashboard() {
         outputHeight: layerMetricGrid.height,
         contours: false,
       })
+      const ctx = rendered.canvas.getContext('2d')
+      if (ctx) {
+        ctx.save()
+        ctx.globalCompositeOperation = 'destination-over'
+        ctx.fillStyle =
+          layer === 'ndvi'
+            ? '#b8d9c6'
+            : layer === 'soil'
+              ? '#d7dfd2'
+              : '#d3dde7'
+        ctx.fillRect(0, 0, rendered.canvas.width, rendered.canvas.height)
+        ctx.restore()
+      }
       return canvasToBase64Png(rendered.canvas)
     } catch {
       return null
     }
   }, [layer, layerMetricGrid])
+
+  const renderedNdviMapImage = useMemo(() => {
+    if (typeof document === 'undefined') return null
+    if (!ndviMetricGrid || !Array.isArray(ndviMetricGrid.values)) return null
+    if (ndviMetricGrid.width < 2 || ndviMetricGrid.height < 2) return null
+    if (ndviMetricGrid.values.length < ndviMetricGrid.width * ndviMetricGrid.height) return null
+    try {
+      const rendered = renderMetricCanvas({
+        metric: 'ndvi',
+        grid: {
+          values: ndviMetricGrid.values,
+          validMask: ndviMetricGrid.validMask,
+          width: ndviMetricGrid.width,
+          height: ndviMetricGrid.height,
+          min: ndviMetricGrid.min,
+          max: ndviMetricGrid.max,
+        },
+        outputWidth: ndviMetricGrid.width,
+        outputHeight: ndviMetricGrid.height,
+        contours: false,
+      })
+      const ctx = rendered.canvas.getContext('2d')
+      if (ctx) {
+        ctx.save()
+        ctx.globalCompositeOperation = 'destination-over'
+        ctx.fillStyle = '#b8d9c6'
+        ctx.fillRect(0, 0, rendered.canvas.width, rendered.canvas.height)
+        ctx.restore()
+      }
+      return canvasToBase64Png(rendered.canvas)
+    } catch {
+      return null
+    }
+  }, [ndviMetricGrid])
 
   const layerImage = renderedLayerImage || providerLayerImage
 
@@ -396,7 +544,7 @@ export default function Dashboard() {
       window.removeEventListener('resize', onResize)
       observer?.disconnect()
     }
-  }, [layerImage, ingest?.bbox?.join(','), layer])
+  }, [layerImage, ingest?.alignment?.bbox?.join(','), ingest?.bbox?.join(','), layer])
 
   async function ensureSignedIn() {
     if (!authConfigured || !auth) throw new Error('Firebase Auth is not configured')
@@ -437,9 +585,8 @@ export default function Dashboard() {
     let maxLat = Number.NEGATIVE_INFINITY
 
     for (const coord of coords) {
-      if (!Array.isArray(coord) || coord.length < 2) continue
-      const lon = Number(coord[0])
-      const lat = Number(coord[1])
+      const lat = Number(coord?.lat ?? coord?.[0])
+      const lon = Number(coord?.lng ?? coord?.[1] ?? coord?.[0])
       if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue
       minLon = Math.min(minLon, lon)
       minLat = Math.min(minLat, lat)
@@ -451,88 +598,20 @@ export default function Dashboard() {
       setBbox(`${minLon},${minLat},${maxLon},${maxLat}`)
     }
   }
-
-  function buildOverlayFromEncoded(data: any, kind: 'soil' | 'et') {
-    if (!data) return data
-    const key = kind === 'soil' ? 'soilMoisture' : 'evapotranspiration'
-    const value = data[key]
-    if (!value || typeof value !== 'string') return data
-    if (value.startsWith('iVBOR')) return { ...data, overlayPng: value }
-
-    const decoded = decodeBase64Json(value)
-    if (!decoded || typeof document === 'undefined') return data
-    const width = Number(decoded.width || 256)
-    const height = Number(decoded.height || 256)
-    const rows: number[] = Array.isArray(decoded.data) ? decoded.data : []
-    const expected = Math.max(1, width * height)
-    const metricValues = new Array(expected).fill(0)
-
-    for (let i = 0; i < expected; i++) {
-      const valuePoint = Number(rows[i])
-      metricValues[i] = Number.isFinite(valuePoint) ? valuePoint : 0
-    }
-
-    const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return data
-    const imageData = ctx.createImageData(width, height)
-
-    let min = Number.POSITIVE_INFINITY
-    let max = Number.NEGATIVE_INFINITY
-    for (const valuePoint of rows) {
-      const valueNumber = Number(valuePoint)
-      if (!Number.isFinite(valueNumber)) continue
-      min = Math.min(min, valueNumber)
-      max = Math.max(max, valueNumber)
-    }
-    const range = max - min || 1
-
-    for (let i = 0; i < metricValues.length; i++) {
-      const point = Number(metricValues[i])
-      const normalized = (point - min) / range
-      const idx = i * 4
-      if (kind === 'soil') {
-        imageData.data[idx] = Math.round(155 - 120 * normalized)
-        imageData.data[idx + 1] = Math.round(94 + 110 * normalized)
-        imageData.data[idx + 2] = Math.round(40 + 165 * normalized)
-      } else {
-        imageData.data[idx] = Math.round(75 + 170 * normalized)
-        imageData.data[idx + 1] = Math.round(190 - 120 * normalized)
-        imageData.data[idx + 2] = Math.round(58 + 40 * (1 - normalized))
-      }
-      imageData.data[idx + 3] = 255
-    }
-
-    ctx.putImageData(imageData, 0, 0)
-    const png = canvas.toDataURL('image/png').replace('data:image/png;base64,', '')
-    return {
-      ...data,
-      overlayPng: png,
-      metricGrid: {
-        values: metricValues,
-        width,
-        height,
-        min: Number.isFinite(Number(decoded?.stats?.min)) ? Number(decoded.stats.min) : Number(min.toFixed(4)),
-        max: Number.isFinite(Number(decoded?.stats?.max)) ? Number(decoded.stats.max) : Number(max.toFixed(4)),
-        source: String(data?.source || (kind === 'soil' ? 'Soil moisture' : 'Evapotranspiration')),
-        units: kind === 'soil' ? 'm3/m3' : 'mm/day',
-        isSimulated: Boolean(data?.isSimulated),
-      } as LayerMetricGrid,
-    }
-  }
   async function analyze() {
     const parsedBbox = parseBbox(bbox)
     if (!parsedBbox) {
       toast.error('Bounding box must be in format minLon,minLat,maxLon,maxLat')
       return
     }
+    const drawnGeometry = polygonStateToGeojson(polygon as any[]) as GeoJsonPolygon | null
 
     setLoading(true)
     setWarnings([])
     setProviders([])
     setInference(null)
+    setSoil(null)
+    setEt(null)
 
     try {
       const ingestResponse = await fetch('/api/ingest/fetch', {
@@ -540,6 +619,7 @@ export default function Dashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           bbox: parsedBbox,
+          geometry: drawnGeometry,
           date: dateRange,
           targetSize: 512,
           policy: 'balanced',
@@ -554,6 +634,10 @@ export default function Dashboard() {
         ? '1-1'
         : ingestData?.ndvi?.grid3x3?.[0]?.cellId || null
       setIngest(ingestData)
+      const alignedBbox = ingestData?.alignment?.bbox || ingestData?.bbox
+      if (Array.isArray(alignedBbox) && alignedBbox.length === 4) {
+        setBbox(alignedBbox.join(','))
+      }
       setSelectedCell(defaultCellId)
       const ingestWarnings = Array.isArray(ingestPayload?.warnings) ? ingestPayload.warnings : []
 
@@ -566,12 +650,12 @@ export default function Dashboard() {
         fetch('/api/soil', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bbox: parsedBbox }),
+          body: JSON.stringify({ bbox: parsedBbox, geometry: drawnGeometry, date: dateRange, targetSize: 512 }),
         }).then((r) => r.json()),
         fetch('/api/et', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bbox: parsedBbox }),
+          body: JSON.stringify({ bbox: parsedBbox, geometry: drawnGeometry, date: dateRange, targetSize: 512 }),
         }).then((r) => r.json()),
         fetch('/api/timeseries', {
           method: 'POST',
@@ -592,18 +676,24 @@ export default function Dashboard() {
       }
 
       if (soilResult.status === 'fulfilled') {
-        setSoil(buildOverlayFromEncoded(soilResult.value?.data, 'soil'))
+        const soilPayload = normalizeHybridLayerPayload(soilResult.value, 'soil')
+        setSoil(soilPayload)
         providerDiagnostics.push(...(soilResult.value?.providersTried || []))
         if (Array.isArray(soilResult.value?.warnings)) nextWarnings.push(...soilResult.value.warnings)
+        if (soilPayload.unavailable) nextWarnings.push(soilPayload.message || 'Soil layer unavailable in strict real-only mode.')
       } else {
+        setSoil({ unavailable: true, message: 'Soil provider unavailable.' })
         nextWarnings.push('Soil provider unavailable.')
       }
 
       if (etResult.status === 'fulfilled') {
-        setEt(buildOverlayFromEncoded(etResult.value?.data, 'et'))
+        const etPayload = normalizeHybridLayerPayload(etResult.value, 'et')
+        setEt(etPayload)
         providerDiagnostics.push(...(etResult.value?.providersTried || []))
         if (Array.isArray(etResult.value?.warnings)) nextWarnings.push(...etResult.value.warnings)
+        if (etPayload.unavailable) nextWarnings.push(etPayload.message || 'ET layer unavailable in strict real-only mode.')
       } else {
+        setEt({ unavailable: true, message: 'ET provider unavailable.' })
         nextWarnings.push('ET provider unavailable.')
       }
 
@@ -657,7 +747,7 @@ export default function Dashboard() {
               : null,
           providersTried: providerDiagnostics,
           context: {
-            bbox: parsedBbox,
+            bbox: ingestData?.alignment?.bbox || ingestData?.bbox || parsedBbox,
             ndviStats: ingestData?.ndvi?.stats,
             grid3x3: ingestData?.ndvi?.grid3x3 || [],
             selectedCell: defaultCellId,
@@ -772,6 +862,30 @@ export default function Dashboard() {
     }
   }
 
+  async function clearCaches() {
+    setCacheClearing(true)
+    try {
+      const response = await fetch('/api/cache/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.message || payload?.error || 'Cache clear failed')
+      }
+      const memoryCount = Number(payload?.memoryCleared || 0)
+      const firestoreCount = Number(payload?.firestoreCleared || 0)
+      toast.success(`Cache cleared (memory: ${memoryCount}, firestore: ${firestoreCount})`)
+      if (payload?.warning) {
+        toast.warning(String(payload.warning))
+      }
+    } catch (error: any) {
+      toast.error(error?.message || 'Cache clear failed')
+    } finally {
+      setCacheClearing(false)
+    }
+  }
+
   return (
     <div className="min-h-screen">
       <NavBar />
@@ -851,12 +965,20 @@ export default function Dashboard() {
                   setPolygon(coords as any)
                   polygonToBbox(coords as any)
                 }}
-                ndviPng={ingest?.ndvi?.previewPng}
-                ndviBounds={ingest?.bbox}
+                ndviPng={renderedNdviMapImage || ingest?.ndvi?.previewPng}
+                ndviBounds={ingest?.alignment?.bbox || ingest?.bbox}
                 grid3x3={ingest?.ndvi?.grid3x3}
+                cellFootprints={ingest?.ndvi?.cellFootprints}
                 selectedCell={selectedCell}
                 onSelectCell={setSelectedCell}
                 showGrid={showGrid}
+                smoothOverlay={true}
+                debugMode={showDebug}
+                debugMetricGrid={ndviMetricGrid}
+                debugAlignmentBbox={ingest?.alignment?.bbox || ingest?.bbox}
+                debugResolutionMeters={ingest?.alignment?.pixelSizeMetersApprox ?? ingest?.dataResolutionMeters ?? null}
+                debugCoverage={ingest?.ndvi?.aoiMaskMeta?.coveredPixelRatio ?? null}
+                clearAoiSignal={clearAoiSignal}
               />
             </div>
 
@@ -872,6 +994,20 @@ export default function Dashboard() {
               </Button>
               <Button variant={showTerrain3D ? 'default' : 'outline'} onClick={() => setShowTerrain3D((prev) => !prev)}>
                 {showTerrain3D ? 'Hide 3D Terrain' : 'Open 3D Terrain'}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setPolygon([])
+                  setSelectedCell(null)
+                  setClearAoiSignal((value) => value + 1)
+                }}
+              >
+                Clear AOI
+              </Button>
+              <Button variant="outline" disabled={cacheClearing} onClick={clearCaches}>
+                {cacheClearing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Database className="mr-2 h-4 w-4" />}
+                Clear Cache
               </Button>
               <Button variant="outline" onClick={() => setShowDebug((value) => !value)}>
                 <Database className="mr-2 h-4 w-4" />{showDebug ? 'Hide Debug' : 'Show Debug'}
@@ -1021,6 +1157,8 @@ export default function Dashboard() {
                   />
                   <AoiGridImageOverlay
                     cells={ingest?.ndvi?.grid3x3}
+                    cellFootprints={ingest?.ndvi?.cellFootprints}
+                    alignmentBbox={ingest?.alignment?.bbox || ingest?.bbox}
                     selectedCell={selectedCell}
                     onSelectCell={setSelectedCell}
                     visible={showGrid}
@@ -1032,7 +1170,23 @@ export default function Dashboard() {
                   {renderedLayerImage
                     ? 'Quantitative metric grid (matches 3D terrain legend).'
                     : 'Provider preview image (grid values unavailable).'}
+                  {layerMetricGrid?.normalizationMode
+                    ? ` | Normalization: ${layerMetricGrid.normalizationMode}`
+                    : ''}
                 </p>
+                {(layer === 'soil' || layer === 'et') && selectedLayerState?.representation && (
+                  <p className="mt-1 text-xs text-zinc-600">
+                    Representation: {selectedLayerState.representation} | Baseline {selectedLayerState.baseline?.provider || 'n/a'} | Proxy {selectedLayerState.proxy?.provider || 'n/a'} | Pixel ~
+                    {selectedLayerState.alignment?.pixelSizeMetersApprox
+                      ? `${selectedLayerState.alignment.pixelSizeMetersApprox.toFixed(1)}m`
+                      : 'n/a'}
+                  </p>
+                )}
+                {selectedLayerState?.unavailable && (
+                  <p className="mt-1 text-xs text-amber-700">
+                    {selectedLayerState.message || `${layer.toUpperCase()} layer unavailable under strict real-only mode.`}
+                  </p>
+                )}
               </>
             ) : (
               <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 p-8 text-center text-sm text-zinc-600">Run analysis to generate layer outputs.</div>
@@ -1045,11 +1199,11 @@ export default function Dashboard() {
               </div>
               <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">
                 <p className="text-xs uppercase tracking-wide text-zinc-500">Soil moisture mean</p>
-                <p className="mt-1 text-lg font-semibold text-zinc-900">{soilStats.mean.toFixed(3)}</p>
+                <p className="mt-1 text-lg font-semibold text-zinc-900">{soil?.unavailable ? 'n/a' : soilStats.mean.toFixed(3)}</p>
               </div>
               <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">
                 <p className="text-xs uppercase tracking-wide text-zinc-500">ET mean (mm/day)</p>
-                <p className="mt-1 text-lg font-semibold text-zinc-900">{etStats.mean.toFixed(3)}</p>
+                <p className="mt-1 text-lg font-semibold text-zinc-900">{et?.unavailable ? 'n/a' : etStats.mean.toFixed(3)}</p>
               </div>
             </div>
             {selectedCellData && (
@@ -1065,12 +1219,14 @@ export default function Dashboard() {
               <div className="mt-3">
                 <AoiTerrain3D
                   open={showTerrain3D}
-                  bbox={ingest?.bbox}
+                  bbox={ingest?.alignment?.bbox || ingest?.bbox}
+                  geometry={polygonStateToGeojson(polygon as any[]) as GeoJsonPolygon | null}
+                  alignmentBbox={ingest?.alignment?.bbox || ingest?.bbox}
+                  cellFootprints={ingest?.ndvi?.cellFootprints || null}
                   texturePng={layerImage || ingest?.ndvi?.previewPng}
                   metricGrid={layerMetricGrid}
                   layer={layer}
                   selectedCell={selectedCell}
-                  quality="high"
                 />
               </div>
             )}
@@ -1238,7 +1394,7 @@ export default function Dashboard() {
       <Chatbot
         objective={objective}
         context={{
-          bbox: ingest?.bbox,
+          bbox: ingest?.alignment?.bbox || ingest?.bbox,
           ndviStats,
           grid3x3: ingest?.ndvi?.grid3x3 || [],
           selectedCell,
@@ -1255,3 +1411,5 @@ export default function Dashboard() {
     </div>
   )
 }
+
+
