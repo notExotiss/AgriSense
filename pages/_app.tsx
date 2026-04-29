@@ -4,6 +4,7 @@ import { ThemeProvider } from 'next-themes'
 import dynamic from 'next/dynamic'
 import Script from 'next/script'
 import { useEffect } from 'react'
+import { Analytics } from '@vercel/analytics/next'
 
 const Toaster = dynamic(() => import('sonner').then(m => m.Toaster), { ssr: false })
 
@@ -76,6 +77,7 @@ export default function MyApp({ Component, pageProps }: AppProps) {
       >
         <Toaster richColors position="top-center" />
         <Component {...pageProps} />
+        <Analytics />
       </ThemeProvider>
     </>
   )
